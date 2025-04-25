@@ -9,6 +9,36 @@ const BUILDS = new Map([
   ['jspi', '../dist/wa-sqlite-jspi.mjs'],
 ]);
 
+
+async function getEncryptionKey(password) {
+  // Initialize encryption key from password
+  const encoder = new TextEncoder();
+  const passwordData = encoder.encode(password);
+  
+  // Derive a key from the password
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    passwordData,
+    "PBKDF2",
+    false,
+    ["deriveBits", "deriveKey"]
+  );
+  
+  // Use PBKDF2 to derive a key
+  return await crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      salt: encoder.encode("wa-sqlite-encrypted-vfs"),
+      iterations: 100000,
+      hash: "SHA-256"
+    },
+    keyMaterial,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
 const MODULE = Symbol('module');
 const VFS_CONFIGS = new Map([
   {
@@ -55,6 +85,11 @@ const VFS_CONFIGS = new Map([
     name: 'OPFSPermutedVFS',
     vfsModule: '../src/examples/OPFSPermutedVFS.js',
   },
+  {
+    name: 'OPFSPermutedEncryptedVFS',
+    vfsModule: '../src/examples/OPFSPermutedEncryptedVFS.js',
+    vfsOptions: { key: await getEncryptionKey('abcd123') }
+  },
 ].map(config => [config.name, config]));
 
 const INDEXEDDB_DBNAMES = ['demo'];
@@ -76,7 +111,7 @@ maybeReset().then(async () => {
       // Create the VFS and register it as the default file system.
       const namespace = await import(config.vfsModule);
       const className = config.vfsClass ?? config.vfsModule.match(/([^/]+)\.js$/)[1];
-      const vfsArgs = (config.vfsArgs ?? ['demo', MODULE])
+      const vfsArgs = (config.vfsArgs ?? ['demo', MODULE, config.vfsOptions])
         .map(arg => arg === MODULE ? module : arg);
       const vfs = await namespace[className].create(...vfsArgs);
       sqlite3.vfs_register(vfs, true);

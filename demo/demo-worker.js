@@ -93,7 +93,10 @@ async function getEncryptionKey(password) {
   {
     name: 'OPFSPermutedEncryptedVFS',
     vfsModule: '../src/examples/OPFSPermutedEncryptedVFS.js',
-    vfsOptions: { key: await getEncryptionKey('abcd123') }
+    vfsOptions: { key: await getEncryptionKey(
+      'abcd123'
+      // 'password'
+    ) }
   },
   {
     name: 'AccessHandlePoolVFS',

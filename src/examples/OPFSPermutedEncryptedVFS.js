@@ -9,7 +9,7 @@ import { WebLocksMixin } from '../WebLocksMixin.js';
 /** @type {LockOptions} */ const POLL_EXCLUSIVE = { ifAvailable: true, mode: 'exclusive' };
 
 // Default number of transactions between flushing the OPFS file and
-// reclaiming free page offsets. Used only when synchronous! = 'full'.
+// reclaiming free offsets. Used only when synchronous! = 'full'.
 const DEFAULT_FLUSH_INTERVAL = 64;
 
 // Used only for debug logging.
@@ -18,7 +18,7 @@ const contextId = Math.random().toString(36).slice(2);
 /**
  * @typedef {Object} Transaction
  * @property {number} txId
- * @property {Map<number, { offset: number, size: number, iv: Uint8Array, digest: Uint32Array }>} [pages]
+ * @property {Map<number, { fileOffset: number, size: number, iv: Uint8Array, digest: Uint32Array }>} [offsets]
  * @property {number} [fileSize]
  * @property {number} [oldestTxId]
  * @property {number[]} [reclaimable]
@@ -30,9 +30,9 @@ const contextId = Math.random().toString(36).slice(2);
  */
 
 /**
- * @typedef {Object} PageMetadata
- * @property {number} i - Page index
- * @property {number} o - Offset
+ * @typedef {Object} OffsetMetadata
+ * @property {number} i - Logical iOffset
+ * @property {number} o - Physical fileOffset
  * @property {number} s - Size of encrypted data
  * @property {Uint8Array} iv - Initialization vector for decryption
  */
@@ -44,8 +44,6 @@ class File {
 
   // Members below are only used for SQLITE_OPEN_MAIN_DB.
 
-  /** @type {CryptoKey} */ encryptionKey;
-  /** @type {number} */ pageSize;
   /** @type {number} */ fileSize; // virtual file size exposed to SQLite
 
   /** @type {IDBDatabase} */ idb;
@@ -56,9 +54,8 @@ class File {
   /** @type {BroadcastChannel} */ broadcastChannel;
   /** @type {(Transaction|AccessRequest)[]} */ broadcastReceived;
 
-  /** @type {Map<number, {offset: number, size: number, iv: Uint8Array}>} */ mapPageToMetadata;
+  /** @type {Map<number, {fileOffset: number, size: number, iv: Uint8Array}>} */ mapOffsets;
   /** @type {Map<number, Transaction>} */ mapTxToPending;
-  /** @type {Set<number>} */ freeOffsets;
 
   /** @type {number} */ lockState;
   /** @type {{read?: function, write?: function, reserved?: function, hint?: function}} */ locks;
@@ -101,7 +98,7 @@ class File {
         const request = indexedDB.open(pathname);
         request.onupgradeneeded = () => {
           const db = request.result;
-          db.createObjectStore('pages', { keyPath: 'i' });
+          db.createObjectStore('offsets', { keyPath: 'i' });
           db.createObjectStore('pending', { keyPath: 'txId'});
         };
         request.onsuccess = () => resolve(request.result);
@@ -195,14 +192,12 @@ export class OPFSPermutedEncryptedVFS extends FacadeVFS {
 
       const file = await File.create(path, flags);
       if (flags & VFS.SQLITE_OPEN_MAIN_DB) {
-        file.pageSize = 0;
         file.fileSize = 0;
         file.viewTx = { txId: 0 };
         file.broadcastChannel = new BroadcastChannel(`permuted:${path}`);
         file.broadcastReceived = [];
-        file.mapPageToMetadata = new Map();
+        file.mapOffsets = new Map();
         file.mapTxToPending = new Map();
-        file.freeOffsets = new Set();
         file.lockState = VFS.SQLITE_LOCK_NONE;
         file.locks = {};
         file.abortController = new AbortController();
@@ -216,22 +211,21 @@ export class OPFSPermutedEncryptedVFS extends FacadeVFS {
         await this.#lock(file, 'write');
         onFinally.push(() => file.locks.write());
 
-        // Load the initial page map from the database.
-        const tx = file.idb.transaction(['pages', 'pending']);
-        const pages = await idbX(tx.objectStore('pages').getAll());
-        file.pageSize = this.#getPageSize(file);
-        file.fileSize = pages.length * file.pageSize;
-
-        // Begin with adding all file offsets to the free list.
-        const opfsFileSize = file.accessHandle.getSize();
-        for (let i = 0; i < opfsFileSize; i += file.pageSize) {
-          file.freeOffsets.add(i);
+        // Load the initial offset map from the database.
+        const tx = file.idb.transaction(['offsets', 'pending']);
+        const offsets = await idbX(tx.objectStore('offsets').getAll());
+        
+        // Find the maximum offset to determine the logical file size
+        if (offsets.length > 0) {
+          const maxOffset = Math.max(...offsets.map(o => o.i));
+          const correspondingEntry = offsets.find(o => o.i === maxOffset);
+          // Use the entry with maximum logical offset to determine file size
+          file.fileSize = maxOffset + correspondingEntry.s;
         }
 
-        // Incorporate the page map data.
-        for (const { i, o, s, iv } of pages) {
-          file.mapPageToMetadata.set(i, { offset: o, size: s, iv });
-          file.freeOffsets.delete(o);
+        // Incorporate the offset map data.
+        for (const { i, o, s, iv } of offsets) {
+          file.mapOffsets.set(i, { fileOffset: o, size: s, iv });
         }
 
         // Incorporate pending transactions.
@@ -239,11 +233,11 @@ export class OPFSPermutedEncryptedVFS extends FacadeVFS {
           /** @type {Transaction[]} */
           const transactions = await idbX(tx.objectStore('pending').getAll());
           for (const transaction of transactions) {
-            // Verify checksums for all pages in this transaction.
-            for (const [index, { offset, size, iv, digest }] of transaction.pages) {
+            // Verify checksums for all offsets in this transaction.
+            for (const [iOffset, { fileOffset, size, iv, digest }] of transaction.offsets) {
               // Read the encrypted data
               const encryptedData = new Uint8Array(size);
-              file.accessHandle.read(encryptedData, { at: offset });
+              file.accessHandle.read(encryptedData, { at: fileOffset });
               
               // Decrypt the data
               const decryptedData = await this.#decryptData(encryptedData, iv);
@@ -391,48 +385,34 @@ export class OPFSPermutedEncryptedVFS extends FacadeVFS {
       if (file.flags & VFS.SQLITE_OPEN_MAIN_DB) {
         file.abortController.signal.throwIfAborted();
 
-        // Look up the page location in the file. Check the pages in
+        // Look up the data location in the file. Check the offsets in
         // any active write transaction first, then the main map.
-        const pageIndex = file.pageSize ?
-          Math.trunc(iOffset / file.pageSize) + 1:
-          1;
+        let offsetMetadata;
         
-        let pageMetadata;
-        if (file.txActive?.pages.has(pageIndex)) {
-          const { offset, size, iv } = file.txActive.pages.get(pageIndex);
-          pageMetadata = { offset, size, iv };
-        } else if (file.mapPageToMetadata.has(pageIndex)) {
-          pageMetadata = file.mapPageToMetadata.get(pageIndex);
+        // Check the active transaction first
+        if (file.txActive?.offsets.has(iOffset)) {
+          const { fileOffset, size, iv } = file.txActive.offsets.get(iOffset);
+          offsetMetadata = { fileOffset, size, iv };
+        } 
+        // Then check the main offset map
+        else if (file.mapOffsets.has(iOffset)) {
+          offsetMetadata = file.mapOffsets.get(iOffset);
         }
 
-        if (pageMetadata) {
-          this.log?.(`read page ${pageIndex} at ${pageMetadata.offset}`);
+        if (offsetMetadata) {
+          this.log?.(`read at iOffset ${iOffset}, fileOffset ${offsetMetadata.fileOffset}`);
           
           // Read the encrypted data
-          const encryptedData = new Uint8Array(pageMetadata.size);
-          file.accessHandle.read(encryptedData, { at: pageMetadata.offset });
+          const encryptedData = new Uint8Array(offsetMetadata.size);
+          file.accessHandle.read(encryptedData, { at: offsetMetadata.fileOffset });
           
           // Decrypt the data
-          const decryptedData = await this.#decryptData(encryptedData, pageMetadata.iv);
+          const decryptedData = await this.#decryptData(encryptedData, offsetMetadata.iv);
           
-          // Copy the appropriate portion to the output buffer
-          const dataOffset = file.pageSize ? iOffset % file.pageSize : 0;
-          const length = Math.min(pData.length, decryptedData.length - dataOffset);
-          pData.set(decryptedData.subarray(dataOffset, dataOffset + length));
+          // Copy the data to the output buffer
+          const length = Math.min(pData.length, decryptedData.length);
+          pData.set(decryptedData.subarray(0, length));
           bytesRead = length;
-        }
-
-        // Get page size if not already known.
-        // This special case for page 1 header reading is kept because SQLite
-        // needs to read the page size early in the process before we have
-        // enough metadata to infer it
-        if (!file.pageSize && iOffset <= 16 && iOffset + bytesRead >= 18) {
-          const dataView = new DataView(pData.slice(16 - iOffset, 18 - iOffset).buffer);
-          file.pageSize = dataView.getUint16(0);
-          if (file.pageSize === 1) {
-            file.pageSize = 65536;
-          }
-          this.log?.(`set page size ${file.pageSize}`);
         }
       } else {
         // On Chrome (at least), passing pData to accessHandle.read() is
@@ -464,10 +444,6 @@ export class OPFSPermutedEncryptedVFS extends FacadeVFS {
 
       if (file.flags & VFS.SQLITE_OPEN_MAIN_DB) {
         file.abortController.signal.throwIfAborted();
-        if (!file.pageSize) {
-          this.log?.(`set page size ${pData.byteLength}`)
-          file.pageSize = pData.byteLength;
-        }
 
         // The first write begins a transaction. Note that xLock/xUnlock
         // is not a good way to determine transaction boundaries because
@@ -476,64 +452,44 @@ export class OPFSPermutedEncryptedVFS extends FacadeVFS {
           this.#beginTx(file);
         }
 
-        // Choose the offset in the file to write this page.
-        let pageOffset;
-        const pageIndex = Math.trunc(iOffset / file.pageSize) + 1;
+        // Choose the physical offset in the file to write this data
+        let fileOffset;
         
+        if (file.txIsOverwrite) {
+          // For VACUUM, use the identity mapping to write data
+          // at its canonical offset.
+          fileOffset = iOffset;
+        } else if (file.txActive.offsets.has(iOffset)) {
+          // This offset has already been written in this transaction.
+          // Use the same physical location.
+          fileOffset = file.txActive.offsets.get(iOffset).fileOffset;
+          this.log?.(`overwrite at iOffset ${iOffset}, fileOffset ${fileOffset}`);
+        } else {
+          // Write to the end of the file.
+          fileOffset = file.txRealFileSize;
+          this.log?.(`append at iOffset ${iOffset}, fileOffset ${fileOffset}`);
+        }
+
         // Encrypt the data before writing
         const { encryptedData, iv } = await this.#encryptData(pData.subarray());
         const encryptedSize = encryptedData.byteLength;
         
-        if (file.txIsOverwrite) {
-          // For VACUUM, use the identity mapping to write each page
-          // at its canonical offset.
-          pageOffset = iOffset;
-        } else if (file.txActive.pages.has(pageIndex)) {
-          // This page has already been written in this transaction.
-          // Use the same offset.
-          pageOffset = file.txActive.pages.get(pageIndex).offset;
-          this.log?.(`overwrite page ${pageIndex} at ${pageOffset}`);
-        } else if (pageIndex === 1 && file.freeOffsets.delete(0)) {
-          // Offset 0 is available for page 1.
-          pageOffset = 0;
-          this.log?.(`write page ${pageIndex} at ${pageOffset}`);
-        } else {
-          // Use the first unused non-zero offset within the file.
-          for (const maybeOffset of file.freeOffsets) {
-            if (maybeOffset) {
-              if (maybeOffset < file.txRealFileSize) {
-                pageOffset = maybeOffset;
-                file.freeOffsets.delete(pageOffset);
-                this.log?.(`write page ${pageIndex} at ${pageOffset}`);
-                break;
-              } else {
-                // This offset is beyond the end of the file.
-                file.freeOffsets.delete(maybeOffset);
-              }
-            }
-          }
-
-          if (pageOffset === undefined) {
-            // Write to the end of the file.
-            pageOffset = file.txRealFileSize;
-            this.log?.(`append page ${pageIndex} at ${pageOffset}`);
-          }
-        }
-        
         // Write the encrypted data
-        file.accessHandle.write(encryptedData, { at: pageOffset });
+        file.accessHandle.write(encryptedData, { at: fileOffset });
 
         // Update the transaction.
-        file.txActive.pages.set(pageIndex, {
-          offset: pageOffset,
+        file.txActive.offsets.set(iOffset, {
+          fileOffset: fileOffset,
           size: encryptedSize,
           iv,
-          digest: checksum(pData.subarray())  // Checksum of unencrypted data
+          digest: checksum(pData.subarray()) // Checksum of unencrypted data
         });
-        file.txActive.fileSize = Math.max(file.txActive.fileSize, pageIndex * file.pageSize);
+        
+        // Update the file size to include this write if needed
+        file.txActive.fileSize = Math.max(file.txActive.fileSize, iOffset + pData.byteLength);
 
         // Track the actual file size.
-        file.txRealFileSize = Math.max(file.txRealFileSize, pageOffset + encryptedSize);
+        file.txRealFileSize = Math.max(file.txRealFileSize, fileOffset + encryptedSize);
       } else {
         // On Chrome (at least), passing pData to accessHandle.write() is
         // an error because pData is a Proxy of a Uint8Array. Calling
@@ -562,12 +518,11 @@ export class OPFSPermutedEncryptedVFS extends FacadeVFS {
         }
         file.txActive.fileSize = iSize;
 
-        // Remove now obsolete pages from file.txActive.pages
-        for (const [index, { offset }] of file.txActive.pages) {
-          // Page indices are 1-based.
-          if (index * file.pageSize > iSize) {
-            file.txActive.pages.delete(index);
-            file.freeOffsets.add(offset);
+        // When truncating, any offset mapping beyond the new size is no longer needed
+        // Note: We can't reclaim the space in the physical file yet
+        for (const [offset] of file.txActive.offsets) {
+          if (offset >= iSize) {
+            file.txActive.offsets.delete(offset);
           }
         }
         return VFS.SQLITE_OK;
@@ -756,12 +711,6 @@ export class OPFSPermutedEncryptedVFS extends FacadeVFS {
           const value = cvtString(pArg, 8);
           this.log?.('xFileControl', file.path, 'PRAGMA', key, value);
           switch (key.toLowerCase()) {
-            case 'page_size':
-              // Don't allow changing the page size.
-              if (value && file.pageSize && Number(value) !== file.pageSize) {
-                return VFS.SQLITE_ERROR;
-              }
-              break;
             case 'synchronous':
               // This VFS only recognizes 'full' and not 'full'.
               if (value) {
@@ -862,33 +811,6 @@ export class OPFSPermutedEncryptedVFS extends FacadeVFS {
   }
 
   /**
-   * Return the database page size, or 0 if not yet known.
-   * @param {File} file 
-   * @returns {number}
-   */
-  #getPageSize(file) {
-    // Instead of decrypting page data, infer page size from file metadata
-    try {
-      // Check if we have any page mapping data already
-      if (file.fileSize > 0 && file.mapPageToMetadata.size > 0) {
-        // Calculate page size from logical file size divided by number of pages
-        // We can do this because SQLite's logical file size is always a multiple of page size
-        const maxPageIndex = Math.max(...Array.from(file.mapPageToMetadata.keys()));
-        if (maxPageIndex > 0) {
-          return Math.floor(file.fileSize / maxPageIndex);
-        }
-      }
-      
-      // If we're opening a new database or don't have enough information yet,
-      // return a default value that will be updated later
-      return 0;
-    } catch (e) {
-      console.error("Error determining page size:", e);
-      return 0;
-    }
-  }
-
-  /**
    * Acquire one of the database file internal Web Locks.
    * @param {File} file 
    * @param {'read'|'write'|'reserved'|'hint'} name 
@@ -924,7 +846,7 @@ export class OPFSPermutedEncryptedVFS extends FacadeVFS {
   async #setView(file, tx) {
     // Publish our view of the database with a lock name that includes
     // the transaction id. As long as we hold the lock, no other connection
-    // will overwrite data we are using.
+    // will overwrite data we still need.
     file.viewTx = tx;
     const lockName = `${file.path}@@[${tx.txId}]`;
     const newReleaser = await new Promise(resolve => {
@@ -990,62 +912,48 @@ export class OPFSPermutedEncryptedVFS extends FacadeVFS {
    * @param {Transaction} message 
    */
   #acceptTx(file, message) {
-    // Update page size if needed
-    if (!file.pageSize && message.fileSize > 0) {
-      // If we have pages but don't know the page size, we can estimate it
-      // For SQLite, page size will be a power of 2 between 512 and 65536
-      const maxPageIndex = Math.max(...Array.from(message.pages.keys(), k => Number(k)));
-      if (maxPageIndex > 0) {
-        const estimatedPageSize = message.fileSize / maxPageIndex;
-        // Round to nearest power of 2
-        const standardPageSizes = [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536];
-        file.pageSize = standardPageSizes.reduce((prev, curr) => 
-          Math.abs(curr - estimatedPageSize) < Math.abs(prev - estimatedPageSize) ? curr : prev
-        );
-        this.log?.(`estimated page size: ${file.pageSize}`);
-      }
-    }
-
-    // Add list of pages made obsolete by this transaction. These pages
-    // can be moved to the free list when all connections have reached
-    // this point.
+    // Add list of offsets made obsolete by this transaction.
+    // Note: In this version we don't immediately reclaim space
     message.reclaimable = [];
 
-    // Update page mapping with transaction pages.
-    for (const [index, { offset, size, iv }] of message.pages) {
-      if (file.mapPageToMetadata.has(index)) {
-        // Remember overwritten pages that can be reused when all
-        // connections have seen this transaction.
-        message.reclaimable.push(file.mapPageToMetadata.get(index).offset);
+    // Update offset mapping with transaction data.
+    for (const [iOffset, { fileOffset, size, iv }] of message.offsets) {
+      // If we have an existing mapping for this offset, 
+      // remember it's original location (though we can't reclaim it yet)
+      if (file.mapOffsets.has(iOffset)) {
+        message.reclaimable.push(file.mapOffsets.get(iOffset).fileOffset);
       }
-      file.mapPageToMetadata.set(index, { offset, size, iv });
-      file.freeOffsets.delete(offset);
+      
+      // Update the mapping for this offset
+      file.mapOffsets.set(iOffset, { fileOffset, size, iv });
     }
 
-    // Remove mappings for truncated pages.
-    if (file.pageSize) {
-      const oldPageCount = Math.ceil(file.fileSize / file.pageSize);
-      const newPageCount = Math.ceil(message.fileSize / file.pageSize);
-      for (let index = newPageCount + 1; index <= oldPageCount; index++) {
-        if (file.mapPageToMetadata.has(index)) {
-          message.reclaimable.push(file.mapPageToMetadata.get(index).offset);
-          file.mapPageToMetadata.delete(index);
+    // Remove mappings for truncated data.
+    if (message.fileSize < file.fileSize) {
+      // Find all offsets that are now beyond the end of the file
+      for (const [iOffset, metadata] of file.mapOffsets.entries()) {
+        if (iOffset >= message.fileSize) {
+          message.reclaimable.push(metadata.fileOffset);
+          file.mapOffsets.delete(iOffset);
         }
       }
     }
 
     file.fileSize = message.fileSize;
     file.mapTxToPending.set(message.txId, message);
+    
     if (message.oldestTxId) {
       // Finalize pending transactions that are no longer needed.
       for (const tx of file.mapTxToPending.values()) {
         if (tx.txId > message.oldestTxId) break;
-
-        // Return no longer referenced pages to the free list.
+        
+        // We log the offsets that could be reclaimed in the future,
+        // but we don't actually try to reuse the space - we just append
+        // to the end of the file until a VACUUM is performed.
         for (const offset of tx.reclaimable) {
-          this.log?.(`reclaim offset ${offset}`);
-          file.freeOffsets.add(offset);
+          this.log?.(`could reclaim offset ${offset} (will be handled by VACUUM)`);
         }
+        
         file.mapTxToPending.delete(tx.txId);
       }
     }
@@ -1058,7 +966,7 @@ export class OPFSPermutedEncryptedVFS extends FacadeVFS {
     // Start a new transaction.
     file.txActive = {
       txId: file.viewTx.txId + 1,
-      pages: new Map(),
+      offsets: new Map(),
       fileSize: file.fileSize
     };
     file.txRealFileSize = file.accessHandle.getSize();
@@ -1070,7 +978,7 @@ export class OPFSPermutedEncryptedVFS extends FacadeVFS {
    */
   async #commitTx(file) {
     // Determine whether to finalize pending transactions, i.e. transfer
-    // them to the IndexedDB pages store.
+    // them to the IndexedDB offsets store.
     if (file.synchronous === 'full' ||
         file.txIsOverwrite ||
         (file.txActive.txId % file.flushInterval) === 0) {
@@ -1078,7 +986,7 @@ export class OPFSPermutedEncryptedVFS extends FacadeVFS {
     }
 
     const tx = file.idb.transaction(
-      ['pages', 'pending'],
+      ['offsets', 'pending'],
       'readwrite',
       { durability: file.synchronous === 'full' ? 'strict' : 'relaxed'});
 
@@ -1089,15 +997,15 @@ export class OPFSPermutedEncryptedVFS extends FacadeVFS {
       }
       file.accessHandle.flush();
       
-      // Transfer page mappings to the pages store for all pending
+      // Transfer offset mappings to the offsets store for all pending
       // transactions that are no longer in use.
-      const pageStore = tx.objectStore('pages');
+      const offsetsStore = tx.objectStore('offsets');
       for (const tx of file.mapTxToPending.values()) {
         if (tx.txId > file.txActive.oldestTxId) break;
 
-        for (const [index, { offset, size, iv }] of tx.pages) {
-          // Store the page metadata in the pages store
-          pageStore.put({ i: index, o: offset, s: size, iv });
+        for (const [iOffset, { fileOffset, size, iv }] of tx.offsets) {
+          // Store the offset metadata in the offsets store
+          offsetsStore.put({ i: iOffset, o: fileOffset, s: size, iv });
         }
       }
 
@@ -1144,9 +1052,6 @@ export class OPFSPermutedEncryptedVFS extends FacadeVFS {
       file.locks.read();
       await this.#lock(file, 'read', SHARED);
 
-      // There should be no extra space in the file now.
-      file.freeOffsets.clear();
-
       file.txIsOverwrite = false;
     }
   }
@@ -1155,11 +1060,8 @@ export class OPFSPermutedEncryptedVFS extends FacadeVFS {
    * @param {File} file 
    */
   #rollbackTx(file) {
-    // Return offsets to the free list.
+    // Nothing to do here - we just abandon the transaction
     this.log?.(`rollback transaction ${file.txActive.txId}`);
-    for (const { offset } of file.txActive.pages.values()) {
-      file.freeOffsets.add(offset);
-    }
     file.txActive = null;
     file.txWriteHint = false;
   }
@@ -1179,65 +1081,49 @@ export class OPFSPermutedEncryptedVFS extends FacadeVFS {
       await lockRequest;
     }
 
-    // Create a intermediate transaction to copy all current page data to
-    // an offset past fileSize. 
+    // Create a intermediate transaction to copy all current data to
+    // new locations past the end of the file.
     file.txActive = {
       txId: file.viewTx.txId + 1,
-      pages: new Map(),
+      offsets: new Map(),
       fileSize: file.fileSize
     };
 
-    // This helper generator provides offsets above fileSize.
-    const offsetGenerator = (function*() {
-      for (const offset of file.freeOffsets) {
-        if (offset >= file.fileSize) {
-          yield offset;
-        }
+    // Keep track of where we're writing in the file
+    let nextFileOffset = file.accessHandle.getSize();
+
+    // Process all offsets in the current mapping
+    for (const [iOffset, { fileOffset, size, iv }] of file.mapOffsets.entries()) {
+      // Read the encrypted data
+      const encryptedData = new Uint8Array(size);
+      if (file.accessHandle.read(encryptedData, { at: fileOffset }) !== size) {
+        throw new Error('Failed to read data');
+      }
+      
+      // Decrypt it
+      const decryptedData = await this.#decryptData(encryptedData, iv);
+      
+      // Re-encrypt it with a new IV
+      const { encryptedData: newEncryptedData, iv: newIv } = await this.#encryptData(decryptedData);
+      
+      // Write it at the end of the file
+      if (file.accessHandle.write(newEncryptedData, { at: nextFileOffset }) !== newEncryptedData.byteLength) {
+        throw new Error('Failed to write data');
       }
 
-      while (true) {
-        yield file.accessHandle.getSize();
-      }
-    })();
-
-    // Calculate total pages based on file size and page size
-    const totalPages = Math.ceil(file.fileSize / file.pageSize);
-    for (let index = 1; index <= totalPages; index++) {
-      if (file.mapPageToMetadata.has(index)) {
-        const { offset, size, iv } = file.mapPageToMetadata.get(index);
-        
-        // Read the encrypted page data
-        const encryptedData = new Uint8Array(size);
-        if (file.accessHandle.read(encryptedData, { at: offset }) !== size) {
-          throw new Error('Failed to read page');
-        }
-        
-        // Decrypt it
-        const decryptedData = await this.#decryptData(encryptedData, iv);
-        
-        // Re-encrypt it with a new IV
-        const { encryptedData: newEncryptedData, iv: newIv } = 
-            await this.#encryptData(decryptedData);
-        
-        // Find a new place to write it
-        const newOffset = offsetGenerator.next().value;
-        
-        // Write it
-        if (file.accessHandle.write(newEncryptedData, { at: newOffset }) !== newEncryptedData.byteLength) {
-          throw new Error('Failed to write page');
-        }
-
-        file.txActive.pages.set(index, {
-          offset: newOffset,
-          size: newEncryptedData.byteLength,
-          iv: newIv,
-          digest: checksum(decryptedData)
-        });
-      }
+      // Record this in the transaction
+      file.txActive.offsets.set(iOffset, {
+        fileOffset: nextFileOffset,
+        size: newEncryptedData.byteLength,
+        iv: newIv,
+        digest: checksum(decryptedData)
+      });
+      
+      // Update our position tracker
+      nextFileOffset += newEncryptedData.byteLength;
     }
     
     file.accessHandle.flush();
-    file.freeOffsets.clear();
     
     // Publish transaction for others.
     file.broadcastChannel.postMessage(file.txActive);
@@ -1255,11 +1141,11 @@ export class OPFSPermutedEncryptedVFS extends FacadeVFS {
     this.#setView(file, file.txActive);
     file.txActive = null;
 
-    // Now all pages are in the file above fileSize. The VACUUM operation
-    // will now copy the pages below fileSize in the proper order. After
-    // that once all connections are up to date the file can be truncated.
+    // Now all data has been copied to new locations.
+    // The VACUUM operation will now reconstruct the database
+    // at its canonical offsets. After that the file can be truncated.
 
-    // This flag tells xWrite to write pages at their canonical offset.
+    // This flag tells xWrite to write data at its canonical offset.
     file.txIsOverwrite = true;
   }
 
@@ -1329,7 +1215,7 @@ function cvtString(dataView, offset) {
 }
 
 /**
- * Compute a page checksum.
+ * Compute a checksum.
  * @param {ArrayBufferView} data 
  * @returns {Uint32Array}
  */
