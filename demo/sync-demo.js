@@ -91,14 +91,14 @@ async function initSQLite() {
 }
 
 // Execute SQL queries
-async function executeSQL(query) {
+function executeSQL(query) {
   try {
     const start = performance.now();
     const results = [];
     
-    for await (const stmt of sqlite3.statements(db, query)) {
+    for (const stmt of sqlite3.syncStatements(db, query)) {
       const rows = [];
-      while (await sqlite3.step(stmt) === SQLite.SQLITE_ROW) {
+      while (sqlite3.syncStep(stmt) === SQLite.SQLITE_ROW) {
         const row = sqlite3.row(stmt);
         rows.push(row);
       }
