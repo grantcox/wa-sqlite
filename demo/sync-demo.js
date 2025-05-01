@@ -121,11 +121,15 @@ async function executeSQL(query) {
 
 window.addEventListener('DOMContentLoaded', async function() {
   // Load the Monaco editor
-  const button = /** @type {HTMLButtonElement} */(document.getElementById('execute'));
+  const executeButton = /** @type {HTMLButtonElement} */(document.getElementById('execute'));
+  const executeFileButton = /** @type {HTMLButtonElement} */(document.getElementById('execute-file'));
+  const fileInput = /** @type {HTMLInputElement} */(document.getElementById('sql-file'));
+  const fileInfo = document.getElementById('sql-file-info');
+  
   const editorReady = createMonacoEditor().then(editor => {
     // Change the button text with selection
     editor.onDidChangeCursorSelection(({selection}) => {
-      button.textContent = selection.isEmpty() ?
+      executeButton.textContent = selection.isEmpty() ?
         'Execute' :
         'Execute selection';
     });
@@ -150,12 +154,63 @@ window.addEventListener('DOMContentLoaded', async function() {
   const [editor, sqliteInitialized] = await Promise.all([editorReady, sqliteReady]);
   
   if (sqliteInitialized) {
-    button.disabled = false;
+    executeButton.disabled = false;
+    executeFileButton.disabled = false;
   }
 
+  // Handle file selection
+  fileInput.addEventListener('change', function() {
+    if (fileInput.files && fileInput.files.length > 0) {
+      const file = fileInput.files[0];
+      fileInfo.textContent = `Selected: ${file.name} (${formatFileSize(file.size)})`;
+    } else {
+      fileInfo.textContent = '';
+    }
+  });
+
+  // Execute SQL file on button click
+  executeFileButton.addEventListener('click', async function() {
+    if (!fileInput.files || fileInput.files.length === 0) {
+      alert('Please select a SQL file first');
+      return;
+    }
+
+    executeButton.disabled = true;
+    executeFileButton.disabled = true;
+
+    // Read the SQL file
+    const file = fileInput.files[0];
+    const fileContent = await file.text();
+    
+    // Clear any previous output on the page
+    const output = document.getElementById('output');
+    while (output.firstChild) output.removeChild(output.lastChild);
+
+    const timestamp = document.getElementById('timestamp');
+    timestamp.textContent = `${new Date().toLocaleTimeString()} - Processing ${file.name}`;
+
+    // Execute the SQL and process results
+    const time = performance.now();
+    const response = await executeSQL(fileContent);
+    timestamp.textContent += ` (${(performance.now() - time).toFixed(1)} milliseconds)`;
+    
+    if (response.results) {
+      // Format the results as tables
+      response.results
+        .map(formatTable)
+        .forEach(table => output.append(table));        
+    } else {
+      output.innerHTML = `<pre>${response.error.message}</pre>`;
+    }
+    
+    executeButton.disabled = false;
+    executeFileButton.disabled = false;
+  });
+
   // Execute SQL on button click
-  button.addEventListener('click', async function() {
-    button.disabled = true;
+  executeButton.addEventListener('click', async function() {
+    executeButton.disabled = true;
+    executeFileButton.disabled = true;
 
     // Get SQL from editor
     const selection = editor.getSelection();
@@ -184,9 +239,21 @@ window.addEventListener('DOMContentLoaded', async function() {
       output.innerHTML = `<pre>${response.error.message}</pre>`;
     }
     
-    button.disabled = false;
+    executeButton.disabled = false;
+    executeFileButton.disabled = false;
   });
 });
+
+// Helper function to format file size
+function formatFileSize(bytes) {
+  if (bytes < 1024) {
+    return bytes + ' bytes';
+  } else if (bytes < 1024 * 1024) {
+    return (bytes / 1024).toFixed(1) + ' KB';
+  } else {
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+}
 
 async function createMonacoEditor() {
   // Insert a script element to bootstrap the monaco loader

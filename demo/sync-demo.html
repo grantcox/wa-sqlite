@@ -31,16 +31,41 @@
         padding: 0.5rem;
         text-align: left;
       }
+
+      .file-upload {
+        margin-top: 1em;
+        padding: 1em;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        display: flex;
+        align-items: center;
+        gap: 1em;
+      }
+
+      #sql-file-info {
+        margin-left: 1em;
+        font-style: italic;
+        color: #666;
+      }
     </style>
   </head>
   <body>
+    <h1>Synchronous main-process demo, not using any worker</h1>
+    
     <div id="editor-container"></div>
     <div><button id="execute" disabled>Execute</button></div>
+    
+    <div class="file-upload">
+      <label for="sql-file">Upload SQL file:</label>
+      <input type="file" id="sql-file" accept=".sql">
+      <button id="execute-file" disabled>Run SQL File</button>
+      <div id="sql-file-info"></div>
+    </div>
+    
     <div id="timestamp"></div>
     <div id="output"></div>
 
     <script type="module" src="sync-demo.js"></script>
-    <h1>Synchronous main-process demo, not using any worker</h1>
 
     <a href="https://github.com/rhashimoto/wa-sqlite" class="github-corner" aria-label="View source on GitHub">
       <svg width="60" height="60" viewBox="0 0 250 250"
