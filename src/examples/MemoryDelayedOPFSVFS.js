@@ -167,7 +167,18 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
         const operation = this.#writeQueue.shift();
 
         if (operation.type === "write") {
-          const { offset, length } = operation;
+          let { offset, length } = operation;
+          let end = offset + length;
+
+          // if the next writes are close enough, just combine them
+          while (this.#writeQueue.length > 0 
+            && this.#writeQueue[0].type === "write" 
+            && this.#writeQueue[0].offset > offset
+            && this.#writeQueue[0].offset <= end + 64000) {
+            const nextOp = this.#writeQueue.shift();
+            end = Math.max(end, nextOp.offset + nextOp.length);
+          }
+          length = end - offset;
 
           // Get the data from the in-memory file
           const dataToWrite = new Uint8Array(file.data, offset, length);

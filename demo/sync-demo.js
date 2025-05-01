@@ -64,6 +64,7 @@ async function initSQLite() {
     const vfsName = searchParams.get('vfsName') ?? config.vfsName ?? 'demo';
 
     // Instantiate SQLite
+    const start = performance.now();
     const { default: moduleFactory } = await import(BUILDS.get(buildName));
     const module = await moduleFactory();
     sqlite3 = SQLite.Factory(module);
@@ -78,6 +79,8 @@ async function initSQLite() {
 
     // Open the database
     db = await sqlite3.open_v2(dbName);
+    const end = performance.now();
+    console.log(`SQLite opened ${dbName} in ${(end - start).toFixed(2)} ms`);
 
     // Return success
     document.getElementById('output').innerHTML =
