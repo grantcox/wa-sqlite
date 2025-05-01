@@ -432,6 +432,24 @@ export function Factory(Module) {
     return SQLite.SQLITE_OK;
   };
 
+  sqlite3.syncExec = function (db, sql, callback) {
+    const stmts = sqlite3.syncStatements(db, sql, { unscoped: true });
+    for (const stmt of stmts) {
+      let columns;
+      while (sqlite3.syncStep(stmt) === SQLite.SQLITE_ROW) {
+        if (callback) {
+          columns = columns ?? sqlite3.column_names(stmt);
+          const row = sqlite3.row(stmt);
+          callback(row, columns);
+        }
+      }
+    }
+    for (const stmt of stmts) {
+      sqlite3.finalize(stmt);
+    }
+    return SQLite.SQLITE_OK;
+  };
+
   sqlite3.finalize = (function() {
     const fname = 'sqlite3_finalize';
     const f = Module.cwrap(fname, ...decl('n:n'), { async });
@@ -725,6 +743,77 @@ export function Factory(Module) {
     })();
   };
 
+  sqlite3.syncStatements = function* (db, sql, options = {}) {
+    const prepare = Module.cwrap(
+      "sqlite3_prepare_v3",
+      "number",
+      ["number", "number", "number", "number", "number", "number"],
+      { async: false }
+    );
+
+    const onFinally = [];
+    try {
+      // Encode SQL string to UTF-8.
+      const utf8 = new TextEncoder().encode(sql);
+
+      // Copy encoded string to WebAssembly memory. The SQLite docs say
+      // zero-termination is a minor optimization so add room for that.
+      // Also add space for the statement handle and SQL tail pointer.
+      const allocSize = utf8.byteLength - (utf8.byteLength % 4) + 12;
+      const pzHead = Module._sqlite3_malloc(allocSize);
+      const pzEnd = pzHead + utf8.byteLength + 1;
+      onFinally.push(() => Module._sqlite3_free(pzHead));
+      Module.HEAPU8.set(utf8, pzHead);
+      Module.HEAPU8[pzEnd - 1] = 0;
+
+      // Use extra space for the statement handle and SQL tail pointer.
+      const pStmt = pzHead + allocSize - 8;
+      const pzTail = pzHead + allocSize - 4;
+
+      // Ensure that statement handles are not leaked.
+      let stmt;
+      function maybeFinalize() {
+        if (stmt && !options.unscoped) {
+          sqlite3.finalize(stmt);
+        }
+        stmt = 0;
+      }
+      onFinally.push(maybeFinalize);
+
+      // Loop over statements.
+      Module.setValue(pzTail, pzHead, "*");
+      do {
+        // Reclaim resources for the previous iteration.
+        maybeFinalize();
+
+        // Call sqlite3_prepare_v3() for the next statement.
+        const zTail = Module.getValue(pzTail, "*");
+        const rc = prepare(
+          db,
+          zTail,
+          pzEnd - pzTail,
+          options.flags || 0,
+          pStmt,
+          pzTail
+        );
+
+        if (rc !== SQLite.SQLITE_OK) {
+          check("sqlite3_prepare_v3", rc, db);
+        }
+
+        stmt = Module.getValue(pStmt, "*");
+        if (stmt) {
+          mapStmtToDB.set(stmt, db);
+          yield stmt;
+        }
+      } while (stmt);
+    } finally {
+      while (onFinally.length) {
+        onFinally.pop()();
+      }
+    }
+  };
+
   sqlite3.step = (function() {
     const fname = 'sqlite3_step';
     const f = Module.cwrap(fname, ...decl('n:n'), { async });
@@ -735,6 +824,19 @@ export function Factory(Module) {
       const rc = await retry(() => f(stmt));
 
       return check(fname, rc, mapStmtToDB.get(stmt), [SQLite.SQLITE_ROW, SQLite.SQLITE_DONE]);
+    };
+  })();
+
+  sqlite3.syncStep = (function () {
+    const fname = "sqlite3_step";
+    const f = Module.cwrap(fname, ...decl("n:n"), { async: false });
+    return function (stmt) {
+      verifyStatement(stmt);
+      const rc = f(stmt);
+      return check(fname, rc, mapStmtToDB.get(stmt), [
+        SQLite.SQLITE_ROW,
+        SQLite.SQLITE_DONE,
+      ]);
     };
   })();
 

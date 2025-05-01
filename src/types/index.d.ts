@@ -524,6 +524,11 @@ declare interface SQLiteAPI {
     zSQL: string,
     callback?: (row: Array<SQLiteCompatibleType|null>, columns: string[]) => void
   ): Promise<number>;
+  syncExec(
+    db: number,
+    zSQL: string,
+    callback?: (row: Array<SQLiteCompatibleType|null>, columns: string[]) => void
+  ): number;
 
   /**
    * Destroy a prepared statement object compiled by {@link statements}
@@ -736,6 +741,7 @@ declare interface SQLiteAPI {
    * @param options
    */
   statements(db: number, sql: string, options?: SQLitePrepareOptions): AsyncIterable<number>;
+  syncStatements(db: number, sql: string, options?: SQLitePrepareOptions): Iterable<number>;
 
   /**
    * Evaluate an SQL statement
@@ -745,6 +751,7 @@ declare interface SQLiteAPI {
    * (rejects on error)
    */
   step(stmt: number): Promise<number>;
+  syncStep(stmt: number): number;
 
    /**
    * Register an update hook
