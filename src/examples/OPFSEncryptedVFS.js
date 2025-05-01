@@ -319,7 +319,7 @@ export class OPFSEncryptedVFS extends FacadeVFS {
   /**
    * Encrypts data using AES-GCM.
    * @param {Uint8Array} data - Data to encrypt
-   * @returns {Uint8Array} - Encrypted data with IV prepended
+   * @returns {Promise<Uint8Array>} - Encrypted data with IV prepended
    */
   async #encryptData(data) {
     try {
@@ -354,7 +354,7 @@ export class OPFSEncryptedVFS extends FacadeVFS {
   /**
    * Decrypts data using AES-GCM.
    * @param {Uint8Array} encryptedData - Encrypted data with IV prepended
-   * @returns {Uint8Array} - Decrypted data
+   * @returns {Promise<Uint8Array>} - Decrypted data
    */
   async #decryptData(encryptedData) {
     try {
@@ -409,7 +409,8 @@ export class OPFSEncryptedVFS extends FacadeVFS {
       if (bytesRead > 0) {
         // We need to decrypt the data synchronously, but the crypto API is async
         // We'll use a synchronous proxy pattern with Atomics to wait for the decryption
-        let decryptedData;
+        
+        /** @type {Uint8Array} */ let decryptedData;
         
         const decryptionPromise = this.#decryptData(encryptedBuffer.subarray(0, bytesRead));
         
@@ -474,7 +475,7 @@ export class OPFSEncryptedVFS extends FacadeVFS {
       const accessHandle = file.accessHandle || file.persistentFile.accessHandle;
       
       // Encrypt the data
-      let encryptedData;
+      /** @type {Uint8Array} */ let encryptedData;
       
       const encryptionPromise = this.#encryptData(pData.subarray());
       
