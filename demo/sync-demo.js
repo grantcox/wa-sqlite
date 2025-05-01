@@ -1,6 +1,7 @@
 // Copyright 2024 Roy T. Hashimoto. All Rights Reserved.
 
 import * as SQLite from '../src/sqlite-api.js';
+import { getEncryptionKey } from '../src/encryption.js';
 
 // This is the path to the Monaco editor distribution. For development
 // this loads from the local server (uses Yarn 2 path).
@@ -21,6 +22,8 @@ const BUILDS = new Map([
   ['default', '../dist/wa-sqlite.mjs'],
   // ['default', '../debug/wa-sqlite.mjs'],
 ]);
+
+const searchParams = new URLSearchParams(location.search);
 
 /**
  * @typedef Config
@@ -44,6 +47,13 @@ const BUILDS = new Map([
     name: 'MemoryDelayedOPFSVFS',
     vfsModule: '../src/examples/MemoryDelayedOPFSVFS.js',
   },
+  {
+    name: 'MemoryDelayedEncryptedOPFSVFS',
+    vfsModule: '../src/examples/MemoryDelayedOPFSVFS.js',
+    vfsOptions: { 
+      key: await getEncryptionKey(searchParams.get('password') || 'abcd123') 
+    }
+  },
 ].map(config => [config.name, config]));
 
 // SQLite instance and database connection
@@ -53,7 +63,6 @@ let db;
 // Initialize SQLite with the selected VFS
 async function initSQLite() {
   try {
-    const searchParams = new URLSearchParams(location.search);
     await maybeReset(searchParams);
     
     const buildName = searchParams.get('build') || BUILDS.keys().next().value;
@@ -73,7 +82,11 @@ async function initSQLite() {
       // Create the VFS and register it as the default file system
       const namespace = await import(config.vfsModule);
       const className = config.vfsClassName ?? config.vfsModule.match(/([^/]+)\.js$/)[1];
-      const vfs = await namespace[className].create(vfsName, module, config.vfsOptions);
+      const vfsOptions = {
+        dbName,
+        ...config.vfsOptions
+      };
+      const vfs = await namespace[className].create(vfsName, module, vfsOptions);
       sqlite3.vfs_register(vfs, true);
     }
 
@@ -123,7 +136,7 @@ function executeSQL(query) {
   }
 }
 
-window.addEventListener('DOMContentLoaded', async function() {
+async function init() {
   // Load the Monaco editor
   const executeButton = /** @type {HTMLButtonElement} */(document.getElementById('execute'));
   const executeFileButton = /** @type {HTMLButtonElement} */(document.getElementById('execute-file'));
@@ -153,7 +166,7 @@ window.addEventListener('DOMContentLoaded', async function() {
 
   // Initialize SQLite
   const sqliteReady = initSQLite();
-  
+
   // Wait for both editor and SQLite to be ready
   const [editor, sqliteInitialized] = await Promise.all([editorReady, sqliteReady]);
   
@@ -246,7 +259,7 @@ window.addEventListener('DOMContentLoaded', async function() {
     executeButton.disabled = false;
     executeFileButton.disabled = false;
   });
-});
+}
 
 // Helper function to format file size
 function formatFileSize(bytes) {
@@ -353,4 +366,12 @@ function cvtErrorToCloneable(e) {
       }));
   }
   return e;
+}
+
+if (document.readyState !== 'loading') {
+  init();
+} else {
+  document.addEventListener('DOMContentLoaded', function () {
+      init();
+  });
 }

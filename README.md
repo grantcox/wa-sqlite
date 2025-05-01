@@ -64,6 +64,9 @@ To serve the demo directly from the source tree:
 
 The demo page provides access to databases on multiple VFS implementations. Query parameters on the demo page URL can be used to specify the configuration and initial state:
 
+- Completely synchronous, writes to OPFS lazily: http://localhost:8000/demo/sync-demo.html?build=default&config=MemoryDelayedOPFSVFS&dbName=plain.sqlite
+- Completely synchronous, writes to OPFS lazily with encryption: http://localhost:8000/demo/sync-demo.html?build=default&config=MemoryDelayedEncryptedOPFSVFS&dbName=enc.sqlite&password=hunter12
+
 | Parameter | Purpose | Values | Default |
 |----|----|----|----|
 | build | Emscripten build type | default, asyncify, jspi | default |
