@@ -79,6 +79,7 @@ async function initSQLite() {
 
     // Open the database
     db = await sqlite3.open_v2(dbName);
+    sqlite3.exec(db, 'PRAGMA page_size=65536;');
     const end = performance.now();
     console.log(`SQLite opened ${dbName} in ${(end - start).toFixed(2)} ms`);
 
