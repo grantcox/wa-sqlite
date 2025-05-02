@@ -310,54 +310,28 @@ function formatRow(data, tag = 'td') {
 
 async function maybeReset(searchParams) {
   if (searchParams.has('reset')) {
-    const outerLockReleaser = await new Promise(resolve => {
-      navigator.locks.request('demo-worker-outer', lock => {
-        return new Promise(release => {
-          resolve(release);
-        });
-      });
-    });
+    console.log('clearing OPFS and IndexedDB');
 
-    await navigator.locks.request('demo-worker-inner', { ifAvailable: true }, async lock => {
-      if (lock) {
-        console.log('clearing OPFS and IndexedDB');
-        const root = await navigator.storage?.getDirectory();
-        if (root) {
-          // @ts-ignore
-          for await (const name of root.keys()) {
-            await root.removeEntry(name, { recursive: true });
-          }
-        }
-    
-        // Clear IndexedDB
-        const dbList = indexedDB.databases ?
-          await indexedDB.databases() :
-          ['demo', 'demo-floor'].map(name => ({ name }));
-        await Promise.all(dbList.map(({name}) => {
-          return new Promise((resolve, reject) => {
-            const request = indexedDB.deleteDatabase(name);
-            request.onsuccess = resolve;
-            request.onerror = reject;
-          });
-        }));
-      } else {
-        console.warn('reset skipped because another instance already holds the lock');
+    const root = await navigator.storage?.getDirectory();
+    if (root) {
+      // @ts-ignore
+      for await (const name of root.keys()) {
+        await root.removeEntry(name, { recursive: true });
       }
-    });
-    
-    await new Promise((resolve, reject) => {
-      const mode = searchParams.has('exclusive') ? 'exclusive' : 'shared';
-      navigator.locks.request('demo-worker-inner', { mode, ifAvailable: true }, lock => {
-        if (lock) {
-          resolve();
-          return new Promise(() => {});
-        } else {
-          reject(new Error('failed to acquire inner lock'));
-        }
-      });
-    });
+    }
 
-    outerLockReleaser();
+    // Clear IndexedDB
+    const dbList = indexedDB.databases ?
+      await indexedDB.databases() :
+      ['demo', 'demo-floor'].map(name => ({ name }));
+    await Promise.all(dbList.map(({name}) => {
+      console.log('deleting IndexedDB database', name);
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.deleteDatabase(name);
+        request.onsuccess = resolve;
+        request.onerror = reject;
+      });
+    }));
   }
 }
 
