@@ -66,6 +66,7 @@ The demo page provides access to databases on multiple VFS implementations. Quer
 
 - Completely synchronous, writes to OPFS lazily: http://localhost:8000/demo/sync-demo.html?build=default&config=MemoryDelayedOPFSVFS&dbName=plain.sqlite
 - Completely synchronous, writes to OPFS lazily with encryption: http://localhost:8000/demo/sync-demo.html?build=default&config=MemoryDelayedEncryptedOPFSVFS&dbName=enc.sqlite&password=hunter12
+- Benchmarks of synchronous VFSs (although bunchmark runs them in a worker): http://localhost:8000/demo/benchmarks/?config=default,MemoryVFS;default,MemoryDelayedOPFSVFS;default,MemoryDelayedEncryptedOPFSVFS
 
 | Parameter | Purpose | Values | Default |
 |----|----|----|----|

@@ -21,6 +21,8 @@ const BUILDS = new Map([
  * @property {object} [vfsOptions] VFS constructor arguments
  */
 
+const searchParams = new URLSearchParams(location.search);
+
 /** @type {Map<string, Config>} */ const VFS_CONFIGS = new Map([
   {
     name: 'default',
@@ -29,6 +31,17 @@ const BUILDS = new Map([
   {
     name: 'MemoryVFS',
     vfsModule: '../src/examples/MemoryVFS.js',
+  },
+  {
+    name: 'MemoryDelayedOPFSVFS',
+    vfsModule: '../src/examples/MemoryDelayedOPFSVFS.js',
+  },
+  {
+    name: 'MemoryDelayedEncryptedOPFSVFS',
+    vfsModule: '../src/examples/MemoryDelayedOPFSVFS.js',
+    vfsOptions: { 
+      key: await getEncryptionKey(searchParams.get('password') || 'abcd123') 
+    }
   },
   {
     name: 'MemoryAsyncVFS',
@@ -79,8 +92,6 @@ const BUILDS = new Map([
     vfsModule: '../src/examples/FLOOR.js',
   },
 ].map(config => [config.name, config]));
-
-const searchParams = new URLSearchParams(location.search);
 
 maybeReset().then(async () => {
   const buildName = searchParams.get('build') || BUILDS.keys().next().value;

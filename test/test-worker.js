@@ -2,42 +2,13 @@
 
 import * as Comlink from 'comlink';
 import * as SQLite from '../src/sqlite-api.js';
+import { getEncryptionKey } from '../src/encryption.js';
 
 const BUILDS = new Map([
   ['default', '../dist/wa-sqlite.mjs'],
   ['asyncify', '../dist/wa-sqlite-async.mjs'],
   ['jspi', '../dist/wa-sqlite-jspi.mjs'],
 ]);
-
-
-async function getEncryptionKey(password) {
-  // Initialize encryption key from password
-  const encoder = new TextEncoder();
-  const passwordData = encoder.encode(password);
-  
-  // Derive a key from the password
-  const keyMaterial = await crypto.subtle.importKey(
-    "raw",
-    passwordData,
-    "PBKDF2",
-    false,
-    ["deriveBits", "deriveKey"]
-  );
-  
-  // Use PBKDF2 to derive a key
-  return await crypto.subtle.deriveKey(
-    {
-      name: "PBKDF2",
-      salt: encoder.encode("wa-sqlite-encrypted-vfs"),
-      iterations: 100000,
-      hash: "SHA-256"
-    },
-    keyMaterial,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt", "decrypt"]
-  );
-}
 
 const MODULE = Symbol('module');
 const VFS_CONFIGS = new Map([
@@ -60,6 +31,17 @@ const VFS_CONFIGS = new Map([
   {
     name: 'MemoryVFS',
     vfsModule: '../src/examples/MemoryVFS.js',
+  },
+  {
+    name: 'MemoryDelayedOPFSVFS',
+    vfsModule: '../src/examples/MemoryDelayedOPFSVFS.js',
+  },
+  {
+    name: 'MemoryDelayedEncryptedOPFSVFS',
+    vfsModule: '../src/examples/MemoryDelayedOPFSVFS.js',
+    vfsOptions: { 
+      key: await getEncryptionKey('abcd123') 
+    }
   },
   {
     name: 'MemoryAsyncVFS',
