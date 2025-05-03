@@ -1,7 +1,6 @@
 // Copyright 2024 Roy T. Hashimoto. All Rights Reserved.
 
 import * as SQLite from '../src/sqlite-api.js';
-import { getEncryptionKey } from '../src/encryption.js';
 
 // This is the path to the Monaco editor distribution. For development
 // this loads from the local server (uses Yarn 2 path).
@@ -51,7 +50,7 @@ const searchParams = new URLSearchParams(location.search);
     name: 'MemoryDelayedEncryptedOPFSVFS',
     vfsModule: '../src/examples/MemoryDelayedOPFSVFS.js',
     vfsOptions: { 
-      key: await getEncryptionKey(searchParams.get('password') || 'abcd123') 
+      encryptionPassword: searchParams.get('password') || 'abcd123'
     }
   },
 ].map(config => [config.name, config]));

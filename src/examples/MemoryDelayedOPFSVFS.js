@@ -1,6 +1,35 @@
 import { FacadeVFS } from "../FacadeVFS.js";
 import * as VFS from "../VFS.js";
 
+export async function buildEncryptionKey(fromPassword) {
+  // Initialize encryption key from password
+  const encoder = new TextEncoder();
+  const passwordData = encoder.encode(fromPassword);
+  
+  // Derive a key from the password
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    passwordData,
+    "PBKDF2",
+    false,
+    ["deriveBits", "deriveKey"]
+  );
+  
+  // Use PBKDF2 to derive a key
+  return await crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      salt: encoder.encode("wa-sqlite-encrypted-vfs"),
+      iterations: 100000,
+      hash: "SHA-256"
+    },
+    keyMaterial,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
 // Memory-based VFS with asynchronous OPFS persistence.
 export class MemoryDelayedOPFSVFS extends FacadeVFS {
   // Map of existing files, keyed by filename.
@@ -30,7 +59,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
   // Buffer for loaded OPFS data (not immediately added to mapNameToFile)
   /** @type {ArrayBuffer} */ #opfsDataBuffer = null;
   
-  // Encryption key
+  /** @type {string} */ #encryptionPassword = null;
   /** @type {CryptoKey} */ #encryptionKey = null;
   
   // Pages storage (maps plaintext offsets to encryption/plaintext metadata)
@@ -54,26 +83,32 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
   /**
    * @param {string} name 
    * @param {*} module
-   * @param {{key?: CryptoKey, dbName?: string}} options
+   * @param {{encryptionPassword?: string, dbName?: string}} options
    * @returns 
    */
   constructor(name, module, options) {
     super(name, module);
     this.#opfsFilename = options.dbName ?? "db.sqlite";
-    this.#encryptionKey = options.key;
+    this.#encryptionPassword = options.encryptionPassword;
 
-    // Initialize IndexedDB first (so we have the IVs), then OPFS (where we decrypt the existing db)
-    // console.log("MemoryDelayedOPFSVFS constructor about to call initIndexedDb")
-    this.#vfsReady = this.#initIndexedDb()
-      .then(() => {
-        return this.#initOpfs()
-      })
-      // console.log("MemoryDelayedOPFSVFS constructor complete")
+    this.#vfsReady = this.init()
+    // console.log("MemoryDelayedOPFSVFS constructor complete")
   }
 
   async isReady() {
     // console.log("MemoryDelayedOPFSVFS isReady, waiting for vfsReady")
     return this.#vfsReady;
+  }
+
+  async init() {
+    if (this.#encryptionPassword) {
+      this.#encryptionKey = await buildEncryptionKey(this.#encryptionPassword);
+    }
+    // Initialize IndexedDB first (so we have the IVs), then OPFS (where we decrypt the existing db)
+    // console.log("MemoryDelayedOPFSVFS constructor about to call initIndexedDb")
+    await this.#initIndexedDb()
+    await this.#initOpfs()
+    return true;
   }
 
   /**
