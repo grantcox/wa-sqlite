@@ -345,6 +345,7 @@ declare interface SQLiteAPI {
    * @returns `SQLITE_OK` (throws exception on error)
    */
   close(db): Promise<number>;
+  syncClose(db): number;
 
   /**
    * Call the appropriate `column_*` function based on the column type

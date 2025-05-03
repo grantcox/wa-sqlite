@@ -260,6 +260,17 @@ export function Factory(Module) {
     };
   })();
 
+  sqlite3.syncClose = (function () {
+    const fname = "sqlite3_close";
+    const f = Module.cwrap(fname, ...decl("n:n"), { async: false });
+    return function (db) {
+      verifyDatabase(db);
+      const result = f(db);
+      databases.delete(db);
+      return check(fname, result, db);
+    };
+  })();
+
   sqlite3.column = function(stmt, iCol) {
     verifyStatement(stmt);
     const type = sqlite3.column_type(stmt, iCol);
