@@ -30,13 +30,27 @@ export async function buildEncryptionKey(fromPassword) {
   );
 }
 
+/**
+ * @typedef {Object} MappedFile
+ * @property {string} pathname
+ * @property {number} flags
+ * @property {number} size
+ * @property {ArrayBuffer} data
+ */
+
+/**
+ * @typedef {Object} PageMeta
+ * @property {number} pageIndex
+ * @property { {offset: number, length: number, iv: Uint8Array} } encData
+ */
+
 // Memory-based VFS with asynchronous OPFS persistence.
 export class MemoryDelayedOPFSVFS extends FacadeVFS {
   // Map of existing files, keyed by filename.
-  mapNameToFile = new Map();
+  /** @type {Map<string, MappedFile>} */ mapNameToFile = new Map();
 
   // Map of open files, keyed by id (sqlite3_file pointer).
-  mapIdToFile = new Map();
+  /** @type {Map<number, MappedFile>} */ mapIdToFile = new Map();
 
   // OPFS root directory handle
   /** @type {FileSystemDirectoryHandle} */ #rootDir = null;
@@ -50,6 +64,9 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
   // Database filename in OPFS
   #opfsFilename = "db.sqlite";
 
+  // OPFS page size for storage (default 64KB)
+  #opfsPageSize = 65536;
+
   // Queue for pending writes to OPFS - stores regions to be written
   #writeQueue = [];
 
@@ -62,16 +79,16 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
   /** @type {string} */ #encryptionPassword = null;
   /** @type {CryptoKey} */ #encryptionKey = null;
   
-  // Pages storage (maps plaintext offsets to encryption/plaintext metadata)
-  /** @type {Map<number, {plainOffset: number, plainLength: number, encOffset: number, encLength: number, iv: Uint8Array}>} */ #pages = new Map();
+  // In-memory PageMeta storage (maps OPFS page index to encryption/plaintext metadata)
+  /** @type {Map<number, PageMeta>} */ #pages = new Map();
   
-  // IDB database for page storage
+  // IDB database for page metadata storage
   /** @type {IDBDatabase} */ #idb = null;
 
   /**
    * @param {string} name 
    * @param {*} module
-   * @param {{key?: CryptoKey, dbName?: string}} options - Optional encryption key
+   * @param {{key?: CryptoKey, dbName?: string, opfsPageSize?: number}} options - Optional encryption key and configuration
    * @returns 
    */
   static async create(name, module, options = {}) {
@@ -83,13 +100,16 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
   /**
    * @param {string} name 
    * @param {*} module
-   * @param {{encryptionPassword?: string, dbName?: string}} options
+   * @param {{encryptionPassword?: string, dbName?: string, opfsPageSize?: number}} options
    * @returns 
    */
   constructor(name, module, options) {
     super(name, module);
     this.#opfsFilename = options.dbName ?? "db.sqlite";
     this.#encryptionPassword = options.encryptionPassword;
+    if (options.opfsPageSize) {
+      this.#opfsPageSize = options.opfsPageSize;
+    }
 
     this.#vfsReady = this.init()
     // console.log("MemoryDelayedOPFSVFS constructor complete")
@@ -170,15 +190,16 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
       return encryptedData;
     }
 
-    // console.log(`Decrypting ${encryptedData.byteLength} bytes from OPFS, with ${this.#pages.size} pages`);
+    console.log(`Decrypting ${encryptedData.byteLength} bytes from OPFS, with ${this.#pages.size} OPFS pages`);
     
     // Calculate the size needed for the decrypted buffer
-    // We need to find the maximum plainOffset + plainLength
+    // We need to find the highest page index and determine its end offset
     let maxPlainEnd = 0;
-    for (const [plainOffset, entry] of this.#pages.entries()) {
-      const plainEnd = plainOffset + entry.plainLength;
-      if (plainEnd > maxPlainEnd) {
-        maxPlainEnd = plainEnd;
+    
+    for (const [pageIndex, pageEntry] of this.#pages.entries()) {
+      const pageEnd = this.#getOpfsPageEnd(pageIndex);
+      if (pageEnd > maxPlainEnd) {
+        maxPlainEnd = pageEnd;
       }
     }
     
@@ -186,25 +207,38 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
     const decryptedBuffer = new ArrayBuffer(maxPlainEnd);
     const decryptedView = new Uint8Array(decryptedBuffer);
     
+    // Sort page indices for sequential processing
+    const pageIndices = Array.from(this.#pages.keys()).sort((a, b) => a - b);
+    
     // Decrypt each page and write it to the right location in the buffer
-    for (const [plainOffset, entry] of this.#pages.entries()) {
-      // console.log(`Decrypting page entry`, plainOffset, entry);
-      const { iv, encOffset, encLength, plainLength } = entry;
+    for (const pageIndex of pageIndices) {
+      const pageEntry = this.#pages.get(pageIndex);
+      const pageStart = this.#getOpfsPageStart(pageIndex);
+      const { offset: encOffset, length: encLength, iv } = pageEntry.encData;
       
-      // Extract the encrypted data at the specified offset
-      const encryptedChunk = new Uint8Array(encryptedData, encOffset, encLength);
-      // console.log(`Encrypted chunk at ${encOffset}, length ${encLength}`, encryptedChunk);
+      if (encOffset === undefined || encLength === undefined || !iv) {
+        console.warn(`Missing encryption data for page ${pageIndex}`);
+        continue;
+      }
       
-      // Decrypt the data chunk
-      const decryptedChunk = await this.#decryptData(encryptedChunk, iv);
-      // console.log(`Decrypted chunk for plainOffset ${plainOffset}, length ${plainLength}`, decryptedChunk);
-      
-      // Write the decrypted data to the appropriate position in the buffer
-      decryptedView.set(decryptedChunk, plainOffset);
-      // console.log(`Wrote decrypted chunk to plainOffset ${plainOffset}`);
+      try {
+        // Extract the encrypted data
+        const encryptedChunk = new Uint8Array(encryptedData, encOffset, encLength);
+        
+        // Decrypt the data
+        const decryptedChunk = await this.#decryptData(encryptedChunk, iv);
+        
+        // Copy the decrypted data to the output buffer
+        decryptedView.set(
+          new Uint8Array(decryptedChunk.buffer, 0, decryptedChunk.byteLength), 
+          pageStart
+        );
+      } catch (e) {
+        console.error(`Error decrypting page ${pageIndex}: ${e.message}`);
+      }
     }
     
-    // console.log(`Finished decrypting file, produced ${maxPlainEnd} bytes of plaintext`);
+    console.log(`Finished decrypting file, produced ${maxPlainEnd} bytes of plaintext`);
     return decryptedBuffer;
   }
 
@@ -250,53 +284,60 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
     }
   }
   
+  /**
+   * Execute an IndexedDB transaction and return the result
+   * @param {IDBTransactionMode} mode - Transaction mode ('readonly' or 'readwrite')
+   * @param {function(IDBObjectStore): IDBRequest} operation - Function that performs the operation on the store
+   * @returns {Promise<any>} - Result of the operation
+   */
+  async #executeIDBTransaction(mode, operation) {
+    if (!this.#idb) {
+      throw new Error("IndexedDB not initialized");
+    }
+    
+    return new Promise((resolve, reject) => {
+      const tx = this.#idb.transaction("pages", mode);
+      const store = tx.objectStore("pages");
+      
+      const request = operation(store);
+      
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
   async #initIndexedDb() {
       // Initialize IndexedDB for page storage
-      // console.log(`initIndexedDb 001`)
       this.#idb = await new Promise((resolve, reject) => {
-        // console.log(`initIndexedDb about to open()`)
         const request = indexedDB.open(`MemoryDelayedOPFSVFS-${this.#opfsFilename}`, 1);
-        // console.log(`initIndexedDb called open()`)
-        request.onupgradeneeded = () => {
-          // console.log(`initIndexedDb onupgradeneeded`)
+        request.onupgradeneeded = (event) => {
           const db = request.result;
-          db.createObjectStore('pages', { keyPath: 'plainOffset' });
+          db.createObjectStore('pages', { keyPath: 'pageIndex' });
         };
         request.onsuccess = () => {
-          // console.log(`initIndexedDb onsuccess`)
           resolve(request.result);
         }
         request.onerror = () => {
-          // console.log(`initIndexedDb onerror`)
           reject(request.error);
         }
       });
-      // console.log(`initIndexedDb 002`)
       
       // Load the pages from IndexedDB
-      await this.#loadPages();
+      await this.#loadPageMetas();
       return true;
   }
   
   /**
    * Load pages from IndexedDB
    */
-  async #loadPages() {
+  async #loadPageMetas() {
     try {
-      const tx = this.#idb.transaction('pages', 'readonly');
-      const store = tx.objectStore('pages');
-      const request = store.getAll();
-      
-      const result = await new Promise((resolve, reject) => {
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
+      const result = await this.#executeIDBTransaction('readonly', store => store.getAll());
       
       // Populate the pages map
       for (const entry of result) {
-        this.#pages.set(entry.plainOffset, entry);
+        this.#pages.set(entry.pageIndex, entry);
       }
-      
     } catch (e) {
       console.error(`Failed to load pages from IndexedDB: ${e.message}`);
     }
@@ -304,35 +345,110 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
   
   /**
    * Save page data to IndexedDB
-   * @param {Uint8Array} iv - The initialization vector
-   * @param {number} plainOffset - The plaintext offset
-   * @param {number} plainLength - The plaintext length
-   * @param {number} encOffset - The encrypted offset in OPFS file
-   * @param {number} encLength - The encrypted length
+   * @param {number} pageIndex - The page index
+   * @param {number} encOffset - The encrypted offset in the file
+   * @param {number} encLength - The length of the encrypted data
+   * @param {Uint8Array} iv - The initialization vector used for encryption
    */
-  async #savePage(iv, plainOffset, plainLength, encOffset, encLength) {
+  async #savePageMeta(pageIndex, encOffset, encLength, iv) {
     try {
-      const tx = this.#idb.transaction('pages', 'readwrite');
-      const store = tx.objectStore('pages');
-      const entry = { iv, plainOffset, plainLength, encOffset, encLength };
-
-      await new Promise((resolve, reject) => {
-        const request = store.put(entry);
-        request.onsuccess = resolve;
-        request.onerror = () => reject(request.error);
-      });
+      // Create the page entry
+      const entry = { 
+        pageIndex,
+        encData: {
+          offset: encOffset,
+          length: encLength,
+          iv
+        }
+      };
+      
+      await this.#executeIDBTransaction('readwrite', store => store.put(entry));
       
       // Store in memory too
-      this.#pages.set(plainOffset, entry);
+      this.#pages.set(pageIndex, entry);
     } catch (e) {
       console.error(`Failed to save page to IndexedDB: ${e.message}`);
     }
   }
+  
+  /**
+   * Delete a page from IndexedDB
+   * @param {number} pageIndex - The page index to delete
+   */
+  async #deletePageMeta(pageIndex) {
+    try {
+      await this.#executeIDBTransaction('readwrite', store => store.delete(pageIndex));
+      
+      // Remove from memory too
+      this.#pages.delete(pageIndex);
+    } catch (e) {
+      console.error(`Failed to delete page from IndexedDB: ${e.message}`);
+    }
+  }
+  
+  /**
+   * Clear all pages from IndexedDB
+   */
+  async #clearPageMetas() {
+    try {
+      await this.#executeIDBTransaction('readwrite', store => store.clear());
+      
+      // Clear memory too
+      this.#pages.clear();
+    } catch (e) {
+      console.error(`Failed to clear pages from IndexedDB: ${e.message}`);
+    }
+  }
 
-
+  /**
+   * Check if a pathname matches our tracked DB file
+   * @param {string} pathname - The pathname to check
+   * @returns {boolean} - Whether this is our tracked DB file
+   */
   #isTrackedDbFile(pathname) {
     // Check if the pathname matches our OPFS filename
     return pathname === `/${this.#opfsFilename}`;
+  }
+
+  /**
+   * Calculate the OPFS page index for a given offset
+   * @param {number} offset - Byte offset into the file
+   * @returns {number} - OPFS page index
+   */
+  #getOpfsPageIndex(offset) {
+    return Math.floor(offset / this.#opfsPageSize);
+  }
+
+  /**
+   * Get the start offset of an OPFS page
+   * @param {number} pageIndex - OPFS page index
+   * @returns {number} - Byte offset of the start of the page
+   */
+  #getOpfsPageStart(pageIndex) {
+    return pageIndex * this.#opfsPageSize;
+  }
+
+  /**
+   * Get the end offset of an OPFS page (exclusive)
+   * @param {number} pageIndex - OPFS page index
+   * @returns {number} - Byte offset of the end of the page
+   */
+  #getOpfsPageEnd(pageIndex) {
+    return (pageIndex + 1) * this.#opfsPageSize;
+  }
+
+  /**
+   * Get the range of OPFS pages affected by a write operation
+   * @param {number} offset - Start offset of the write
+   * @param {number} length - Length of the write
+   * @returns {{startPageIndex: number, endPageIndex: number}} - Range of page indices (inclusive)
+   */
+  #getAffectedOpfsPageRange(offset, length) {
+    if (length === 0) return { startPageIndex: 0, endPageIndex: -1 }; // Empty range
+    
+    const startPageIndex = this.#getOpfsPageIndex(offset);
+    const endPageIndex = this.#getOpfsPageIndex(offset + length - 1);
+    return { startPageIndex, endPageIndex };
   }
 
   /**
@@ -385,7 +501,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
     }
   }
   /**
-   * Process all pending operations in the queue in order without coalescing
+   * Process all pending operations in the queue using page-aligned writes
    */
   async #processWriteQueue() {
     if (
@@ -398,7 +514,6 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
 
     this.#isProcessingWrites = true;
     const start = performance.now();
-    let processed = 0;
     console.log(`Processing ${this.#writeQueue.length} write operations`);
 
     try {
@@ -412,130 +527,60 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
         return;
       }
 
-      // Create a writable stream - we'll use a single writable for all operations
-      // to avoid the overhead of opening and closing the file multiple times
-      // console.log(`Opening file for processing ${this.#writeQueue.length} operations`);
-      const writable = await this.#dbFileHandle.createWritable({
-        keepExistingData: true,
-      });
+      // Create a writable stream to the OPFS file
+      const writable = await this.#dbFileHandle.createWritable({ keepExistingData: true });
       let writeFileLength = (await this.#dbFileHandle.getFile()).size;
 
-      // Process each operation in order
-      let continueProcessing = true;
-
-      while (this.#writeQueue.length > 0 && continueProcessing) {
-        processed++;
-        const operation = this.#writeQueue.shift();
-
+      const operations = this.#writeQueue.splice(0);
+      
+      // Track dirty pages that need to be written
+      /** @type {Set<number>} */ let dirtyPages = new Set();
+      
+      // Process all operations in order
+      for (const operation of operations) {
         if (operation.type === "write") {
-          let { offset, length } = operation;
-
-          // Get the data from the in-memory file
-          const plainData = new Uint8Array(memSqliteFile.data, offset, length);
-
-          if (this.#encryptionKey) {
-            const { encryptedData, iv } = await this.#encryptData(plainData);
-
-            // store the encryption metadata in the pages map
-            const existingPage = this.#pages.get(offset);
-            let encOffset;
-            if (existingPage) {
-              // Re-use existing encrypted offset if we already have one for this offset
-              encOffset = existingPage.encOffset;
-            } else {
-              // Append to the end of the file
-              encOffset = writeFileLength;
-              writeFileLength += encryptedData.byteLength;
-            }
-            
-            // Save the page metadata for later decryption
-            await this.#savePage(iv, offset, length, encOffset, encryptedData.byteLength);
-            
-            // Seek to the position and write the encrypted data
-            await writable.seek(encOffset);
-            await writable.write(encryptedData);
-
-            // console.log(`Wrote ${length} bytes (plaintext) / ${encryptedData.byteLength} bytes (encrypted) at plainOffset ${offset}, encOffset ${encOffset} to OPFS with encryption`, encryptedData);
-
-          } else {
-            // Write the data without encryption
-            await writable.seek(offset);
-            await writable.write(plainData);
-          }
-
-          // console.log(`Wrote ${length} bytes at offset ${offset} to OPFS`);
-        } else if (operation.type === "truncate") {
-          // Truncate operation
-          const { size } = operation;
+          // Collect the affected pages for this write
+          const { offset, length } = operation;
+          const { startPageIndex, endPageIndex } = this.#getAffectedOpfsPageRange(offset, length);
           
-          // Perform truncation
-          await writable.truncate(size);
-          writeFileLength = size;
+          // Mark each affected page as dirty
+          for (let pageIndex = startPageIndex; pageIndex <= endPageIndex; pageIndex++) {
+            dirtyPages.add(pageIndex);
+          }
+        } 
+        else if (operation.type === "truncate") {
+          const size = operation.size;
+          const truncatePageIndex = this.#getOpfsPageIndex(size);
           
-          // If using encryption, remove pages for truncated data
-          if (this.#encryptionKey && this.#idb) {
-            try {
-              const tx = this.#idb.transaction('pages', 'readwrite');
-              const store = tx.objectStore('pages');
-              
-              // Delete all pages at plainOffsets >= size
-              for (const plainOffset of Array.from(this.#pages.keys())) {
-                if (plainOffset >= size) {
-                  store.delete(plainOffset);
-                  this.#pages.delete(plainOffset);
-                }
+          // Filter out completely truncated pages, keeping only pages within the new file size
+          Array.from(dirtyPages).forEach((pageIndex) => {
+              // Remove any pages that are completely truncated
+              if (pageIndex > truncatePageIndex) {
+                dirtyPages.delete(pageIndex);
               }
-              
-              await new Promise(resolve => {
-                tx.oncomplete = resolve;
-                tx.onerror = resolve; // Continue on error
-              });
-            } catch (e) {
-              console.error(`Error cleaning up pages after truncate: ${e.message}`);
-            }
-          }
-          // console.log(`Truncated OPFS file to ${size} bytes`);
-        } else if (operation.type === "delete") {
-          // Close the current writable since we're deleting the file
-          await writable.close();
-
-          try {
-            // Delete the file
-            await this.#rootDir.removeEntry(this.#opfsFilename);
-            this.#dbFileHandle = null;
-            
-            // If using encryption, clear all pages
-            if (this.#encryptionKey && this.#idb) {
-              try {
-                const tx = this.#idb.transaction('pages', 'readwrite');
-                const store = tx.objectStore('pages');
-                
-                // Clear all pages
-                store.clear();
-                this.#pages.clear();
-                
-                await new Promise(resolve => {
-                  tx.oncomplete = resolve;
-                  tx.onerror = resolve; // Continue on error
-                });
-              } catch (e) {
-                console.error(`Error clearing pages after delete: ${e.message}`);
-              }
-            }
-            
-            console.log(`Deleted OPFS file`);
-
-            // Stop processing further operations
-            continueProcessing = false;
-            this.#writeQueue = [];
-          } catch (e) {
-            console.error(`Failed to delete OPFS file: ${e.message}`);
-          }
+          })
+          
+          this.#processTruncateOperation(size, writable);
+        } 
+        else if (operation.type === "delete") {
+          // Discard all dirty pages - no need to write before deletion
+          dirtyPages.clear();
+          this.#processDeleteOperation(writable);
+          
+          // Operations after a delete would be for a new file, so exit the loop
+          break;
         }
       }
-
-      // Close the stream after all operations if we haven't already closed it
-      if (continueProcessing) {
+      
+      // Write any remaining dirty pages
+      if (dirtyPages.size > 0 && this.#dbFileHandle) {
+        for (const pageIndex of dirtyPages.keys()) {
+          writeFileLength = await this.#processOpfsPage(pageIndex, memSqliteFile, writable, writeFileLength);
+        }
+      }
+      
+      // Close writable if we still have one
+      if (this.#dbFileHandle) {
         await writable.close();
       }
     } catch (e) {
@@ -543,12 +588,110 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
     } finally {
       this.#isProcessingWrites = false;
       const end = performance.now();
-      console.log(`Processed ${processed} write operations in ${(end - start).toFixed(2)} ms`);
+      console.log(`Processed writes in ${(end - start).toFixed(2)} ms`);
 
       // If more operations were added while processing, start again
       if (this.#writeQueue.length > 0) {
         setTimeout(() => this.#processWriteQueue(), 0);
       }
+    }
+  }
+  
+  /**
+   * Process a single OPFS page
+   * @param {number} pageIndex - The OPFS page index
+   * @param {Object} memSqliteFile - The in-memory SQLite file
+   * @param {FileSystemWritableFileStream} writable - The OPFS writable stream
+   * @param {number} writeFileLength - Current length of the OPFS file
+   * @returns {Promise<number>} - New length of the OPFS file
+   */
+  async #processOpfsPage(pageIndex, memSqliteFile, writable, writeFileLength) {
+    // Calculate the page boundaries in the SQLite file
+    const pageStart = this.#getOpfsPageStart(pageIndex);
+    const pageEnd = Math.min(this.#getOpfsPageEnd(pageIndex), memSqliteFile.size);
+    const readDataSize = pageEnd - pageStart;
+    
+    // Extract the page data from memory
+    const plainData = new Uint8Array(memSqliteFile.data, pageStart, readDataSize);
+    
+    if (this.#encryptionKey) {
+      // Encrypt the page
+      const { encryptedData, iv } = await this.#encryptData(plainData);
+      
+      // Determine where to write the encrypted page
+      let encOffset;
+      const existingPage = this.#pages.get(pageIndex);
+      
+      if (existingPage) {
+        // Reuse the existing location if we've written this page before
+        encOffset = existingPage.encData.offset;
+      } else {
+        // Append to the end of the file
+        encOffset = writeFileLength;
+        writeFileLength += encryptedData.byteLength;
+      }
+      
+      // Write the encrypted page to OPFS
+      await writable.seek(encOffset);
+      await writable.write(encryptedData);
+      
+      // Save the page metadata
+      await this.#savePageMeta(pageIndex, encOffset, encryptedData.byteLength, iv);
+      
+      return writeFileLength;
+    } else {
+      // For unencrypted storage, write directly at the page-aligned offset
+      await writable.seek(pageStart);
+      await writable.write(plainData);
+      
+      return Math.max(writeFileLength, pageStart + readDataSize);
+    }
+  }
+  
+  /**
+   * Process a truncate operation (used for direct truncate calls only)
+   * @param {number} size - The new size of the unencrypted SQLite file, in bytes
+   * @param {FileSystemWritableFileStream} writable - The OPFS writable stream
+   */
+  async #processTruncateOperation(size, writable) {
+    if (this.#encryptionKey) {
+      // For encrypted storage, delete pages after truncation point
+      const truncatePageIndex = this.#getOpfsPageIndex(size);
+      const pagesToDelete = Array.from(this.#pages.keys()).filter(
+        pageIdx => pageIdx > truncatePageIndex
+      );
+      
+      for (const pageIdx of pagesToDelete) {
+        await this.#deletePageMeta(pageIdx);
+      }
+
+      // as the pages may be written to OPFS out-of-order, we cannot truncate the file
+      // space can be reclaimed by VACUUM
+
+    } else {
+      // For unencrypted storage, just truncate the file
+      await writable.truncate(size);
+    }
+  }
+  
+  /**
+   * Process a delete operation (used for direct delete calls only)
+   * @param {FileSystemWritableFileStream} writable - The OPFS writable stream
+   */
+  async #processDeleteOperation(writable) {
+    try {
+      // Delete the file from OPFS
+      await this.#rootDir.removeEntry(this.#opfsFilename);
+      this.#dbFileHandle = null;
+      
+      // Clear all page metadata
+      if (this.#encryptionKey) {
+        await this.#clearPageMetas();
+      }
+      
+      console.log(`Deleted OPFS file`);
+    } catch (e) {
+      console.error(`Failed to delete OPFS file: ${e.message}`);
     }
   }
 
