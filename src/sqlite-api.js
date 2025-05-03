@@ -521,6 +521,27 @@ export function Factory(Module) {
     };
   })();
 
+  sqlite3.syncOpen = (function () {
+    const fname = "sqlite3_open_v2";
+    const f = Module.cwrap(fname, ...decl("snnn:n"), { async: false });
+    return function (zFilename, flags, zVfs) {
+      flags = flags || SQLite.SQLITE_OPEN_CREATE | SQLite.SQLITE_OPEN_READWRITE;
+      zVfs = createUTF8(zVfs);
+      try {
+        const rc = f(zFilename, tmpPtr[0], flags, zVfs);
+
+        const db = Module.getValue(tmpPtr[0], "*");
+        databases.add(db);
+
+        Module.ccall("RegisterExtensionFunctions", "void", ["number"], [db]);
+        check(fname, rc);
+        return db;
+      } finally {
+        Module._sqlite3_free(zVfs);
+      }
+    };
+  })();
+
   sqlite3.progress_handler = function(db, nProgressOps, handler, userData) {
     verifyDatabase(db);
     Module.progress_handler(db, nProgressOps, handler, userData);

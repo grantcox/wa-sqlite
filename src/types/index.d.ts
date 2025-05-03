@@ -593,6 +593,11 @@ declare interface SQLiteAPI {
     iFlags?: number,
     zVfs?: string    
   ): Promise<number>;
+  syncOpen(
+    zFilename: string,
+    iFlags?: number,
+    zVfs?: string    
+  ): number;
 
   /**
    * Specify callback to be invoked between long-running queries
