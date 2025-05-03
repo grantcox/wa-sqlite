@@ -456,7 +456,7 @@ export function Factory(Module) {
       }
     }
     for (const stmt of stmts) {
-      sqlite3.finalize(stmt);
+      sqlite3.syncFinalize(stmt);
     }
     return SQLite.SQLITE_OK;
   };
@@ -467,6 +467,19 @@ export function Factory(Module) {
     return async function(stmt) {
       const result = await f(stmt);
       mapStmtToDB.delete(stmt)
+
+      // Don't throw on error here. Typically the error has already been
+      // thrown and finalize() is part of the cleanup.
+      return result;
+    };
+  })();
+
+  sqlite3.syncFinalize = (function () {
+    const fname = "sqlite3_finalize";
+    const f = Module.cwrap(fname, ...decl("n:n"), { async: false });
+    return function (stmt) {
+      const result = f(stmt);
+      mapStmtToDB.delete(stmt);
 
       // Don't throw on error here. Typically the error has already been
       // thrown and finalize() is part of the cleanup.

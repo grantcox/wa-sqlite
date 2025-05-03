@@ -541,6 +541,7 @@ declare interface SQLiteAPI {
    * @returns Promise resolving to `SQLITE_OK` or error status
    */
   finalize(stmt: number): Promise<number>;
+  syncFinalize(stmt: number): number;
 
   /**
    * Test for autocommit mode
