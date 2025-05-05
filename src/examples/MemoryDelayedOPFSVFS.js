@@ -61,8 +61,10 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
   // Track if OPFS is ready
   /** @type {Promise<boolean>} */ #vfsReady = null;
 
-  // Database filename in OPFS
-  #opfsFilename = "db.sqlite";
+  // We only persist one database to OPFS, although SQLite can open multiple files
+  // this is the name of the database file we persist to OPFS
+  // the actual filename in OPFS may be slightly different
+  #dbName = "db.sqlite";
 
   // OPFS page size for storage (default 64KB)
   #opfsPageSize = 65536;
@@ -105,7 +107,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
    */
   constructor(name, module, options) {
     super(name, module);
-    this.#opfsFilename = options.dbName ?? "db.sqlite";
+    this.#dbName = options.dbName ?? "db.sqlite";
     this.#encryptionPassword = options.encryptionPassword;
     if (options.opfsPageSize) {
       this.#opfsPageSize = options.opfsPageSize;
@@ -246,8 +248,9 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
     try {
       // Get a handle to the file in OPFS (creating if necessary)
       this.#rootDir = await navigator.storage.getDirectory();
+      const filenameInOpfs = this.#encryptionKey ? `${this.#dbName}.enc` : this.#dbName;
       this.#dbFileHandle = await this.#rootDir.getFileHandle(
-        this.#opfsFilename,
+        filenameInOpfs,
         { create: true }
       );
 
@@ -309,7 +312,9 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
   async #initIndexedDb() {
       // Initialize IndexedDB for page storage
       this.#idb = await new Promise((resolve, reject) => {
-        const request = indexedDB.open(`MemoryDelayedOPFSVFS-${this.#opfsFilename}`, 1);
+
+        const indexedDbName = `MemoryDelayedOPFSVFS-${this.#dbName}${this.#encryptionKey ? '-enc' : ''}`;
+        const request = indexedDB.open(indexedDbName, 1);
         request.onupgradeneeded = (event) => {
           const db = request.result;
           db.createObjectStore('pages', { keyPath: 'pageIndex' });
@@ -351,23 +356,21 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
    * @param {Uint8Array} iv - The initialization vector used for encryption
    */
   async #savePageMeta(pageIndex, encOffset, encLength, iv) {
+    // Create the page entry
+    const entry = { 
+      pageIndex,
+      encData: {
+        offset: encOffset,
+        length: encLength,
+        iv
+      }
+    };
+
     try {
-      // Create the page entry
-      const entry = { 
-        pageIndex,
-        encData: {
-          offset: encOffset,
-          length: encLength,
-          iv
-        }
-      };
-      
       await this.#executeIDBTransaction('readwrite', store => store.put(entry));
-      
-      // Store in memory too
       this.#pages.set(pageIndex, entry);
     } catch (e) {
-      console.error(`MemoryDelayedOPFSVFS | Failed to save page to IndexedDB: ${e.message}`);
+      console.error(`MemoryDelayedOPFSVFS | Failed to save page to IndexedDB: ${e.message}`, entry);
     }
   }
   
@@ -382,7 +385,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
       // Remove from memory too
       this.#pages.delete(pageIndex);
     } catch (e) {
-      console.error(`MemoryDelayedOPFSVFS | Failed to delete page from IndexedDB: ${e.message}`);
+      console.error(`MemoryDelayedOPFSVFS | Failed to delete page ${pageIndex} from IndexedDB: ${e.message}`);
     }
   }
   
@@ -407,7 +410,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
    */
   #isTrackedDbFile(pathname) {
     // Check if the pathname matches our OPFS filename
-    return pathname === `/${this.#opfsFilename}`;
+    return pathname === `/${this.#dbName}`;
   }
 
   /**
@@ -519,10 +522,10 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
 
     try {
       // Find the in-memory database file object from the mapNameToFile
-      const memSqliteFile = this.mapNameToFile.get(`/${this.#opfsFilename}`);
+      const memSqliteFile = this.mapNameToFile.get(`/${this.#dbName}`);
       if (!memSqliteFile) {
         console.error(
-          `MemoryDelayedOPFSVFS | Cannot find file /${this.#opfsFilename} in mapNameToFile`
+          `MemoryDelayedOPFSVFS | Cannot find file /${this.#dbName} in mapNameToFile`
         );
         this.#isProcessingWrites = false;
         return;
@@ -683,7 +686,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
   async #processDeleteOperation(writable) {
     try {
       // Delete the file from OPFS
-      await this.#rootDir.removeEntry(this.#opfsFilename);
+      await this.#rootDir.removeEntry(this.#dbName);
       this.#dbFileHandle = null;
       
       // Clear all page metadata
@@ -918,7 +921,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
     // If not found in memory and this is our database file, check if we have a buffered version
     const isBufferedDb =
       !fileExists &&
-      pathname === `/${this.#opfsFilename}` &&
+      pathname === `/${this.#dbName}` &&
       this.#opfsDataBuffer !== null;
 
     // A file exists if it's either in memory or in our buffer
