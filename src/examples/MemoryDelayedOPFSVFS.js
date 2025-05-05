@@ -236,7 +236,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
           pageStart
         );
       } catch (e) {
-        console.error(`MemoryDelayedOPFSVFS | Error decrypting page ${pageIndex}: ${e.message}`);
+        console.error(`MemoryDelayedOPFSVFS | Error decrypting page ${pageIndex}`, e);
       }
     }
     
@@ -613,12 +613,19 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
   async #processOpfsPage(pageIndex, memSqliteFile, writable, writeFileLength) {
     // Calculate the page boundaries in the SQLite file
     const pageStart = this.#getOpfsPageStart(pageIndex);
-    const pageEnd = Math.min(this.#getOpfsPageEnd(pageIndex), memSqliteFile.size);
-    const readDataSize = pageEnd - pageStart;
+    const plainData = new Uint8Array(this.#opfsPageSize);
     
-    // Extract the page data from memory
-    const plainData = new Uint8Array(memSqliteFile.data, pageStart, readDataSize);
+    // Calculate how much actual data we can copy from the source
+    const availableData = Math.max(0, Math.min(
+      this.#opfsPageSize,                     // Don't exceed page size
+      memSqliteFile.size - pageStart          // Don't read past end of file
+    ));
     
+    if (availableData > 0) {
+      const sourceData = new Uint8Array(memSqliteFile.data, pageStart, availableData);
+      plainData.set(sourceData, 0);
+    }
+
     if (this.#encryptionKey) {
       // Encrypt the page
       const { encryptedData, iv } = await this.#encryptData(plainData);
@@ -648,8 +655,8 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
       // For unencrypted storage, write directly at the page-aligned offset
       await writable.seek(pageStart);
       await writable.write(plainData);
-      
-      return Math.max(writeFileLength, pageStart + readDataSize);
+
+      return Math.max(writeFileLength, pageStart + this.#opfsPageSize);
     }
   }
   
