@@ -190,7 +190,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
       return encryptedData;
     }
 
-    console.log(`Decrypting ${encryptedData.byteLength} bytes from OPFS, with ${this.#pages.size} OPFS pages`);
+    console.log(`MemoryDelayedOPFSVFS | Decrypting ${encryptedData.byteLength} bytes from OPFS, with ${this.#pages.size} OPFS pages`);
     
     // Calculate the size needed for the decrypted buffer
     // We need to find the highest page index and determine its end offset
@@ -217,7 +217,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
       const { offset: encOffset, length: encLength, iv } = pageEntry.encData;
       
       if (encOffset === undefined || encLength === undefined || !iv) {
-        console.warn(`Missing encryption data for page ${pageIndex}`);
+        console.warn(`MemoryDelayedOPFSVFS | Missing encryption data for page ${pageIndex}`);
         continue;
       }
       
@@ -234,11 +234,11 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
           pageStart
         );
       } catch (e) {
-        console.error(`Error decrypting page ${pageIndex}: ${e.message}`);
+        console.error(`MemoryDelayedOPFSVFS | Error decrypting page ${pageIndex}: ${e.message}`);
       }
     }
     
-    console.log(`Finished decrypting file, produced ${maxPlainEnd} bytes of plaintext`);
+    console.log(`MemoryDelayedOPFSVFS | Finished decrypting file, produced ${maxPlainEnd} bytes of plaintext`);
     return decryptedBuffer;
   }
 
@@ -256,7 +256,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
 
       return true;
     } catch (e) {
-      console.error(`Failed to initialize OPFS`, e.message, e.stack, e.className);
+      console.error(`MemoryDelayedOPFSVFS | Failed to initialize OPFS`, e.message, e.stack, e.className);
       return false;
     }
   }
@@ -272,7 +272,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
       return await this.#decryptFile(encryptedData);
       } catch (e) {
         if (e instanceof DOMException && e.name === "OperationError") {
-          console.error("Incorrect encryption key or corrupted data");
+          console.error("MemoryDelayedOPFSVFS | Incorrect encryption key or corrupted data");
           return new ArrayBuffer(0);
         } else {
           throw e;
@@ -339,7 +339,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
         this.#pages.set(entry.pageIndex, entry);
       }
     } catch (e) {
-      console.error(`Failed to load pages from IndexedDB: ${e.message}`);
+      console.error(`MemoryDelayedOPFSVFS | Failed to load pages from IndexedDB: ${e.message}`);
     }
   }
   
@@ -367,7 +367,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
       // Store in memory too
       this.#pages.set(pageIndex, entry);
     } catch (e) {
-      console.error(`Failed to save page to IndexedDB: ${e.message}`);
+      console.error(`MemoryDelayedOPFSVFS | Failed to save page to IndexedDB: ${e.message}`);
     }
   }
   
@@ -382,7 +382,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
       // Remove from memory too
       this.#pages.delete(pageIndex);
     } catch (e) {
-      console.error(`Failed to delete page from IndexedDB: ${e.message}`);
+      console.error(`MemoryDelayedOPFSVFS | Failed to delete page from IndexedDB: ${e.message}`);
     }
   }
   
@@ -396,7 +396,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
       // Clear memory too
       this.#pages.clear();
     } catch (e) {
-      console.error(`Failed to clear pages from IndexedDB: ${e.message}`);
+      console.error(`MemoryDelayedOPFSVFS | Failed to clear pages from IndexedDB: ${e.message}`);
     }
   }
 
@@ -514,14 +514,15 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
 
     this.#isProcessingWrites = true;
     const start = performance.now();
-    console.log(`Processing ${this.#writeQueue.length} write operations`);
+    console.log(`MemoryDelayedOPFSVFS | Processing ${this.#writeQueue.length} write operations`);
+    let writtenPageCount = 0;
 
     try {
       // Find the in-memory database file object from the mapNameToFile
       const memSqliteFile = this.mapNameToFile.get(`/${this.#opfsFilename}`);
       if (!memSqliteFile) {
         console.error(
-          `Cannot find file /${this.#opfsFilename} in mapNameToFile`
+          `MemoryDelayedOPFSVFS | Cannot find file /${this.#opfsFilename} in mapNameToFile`
         );
         this.#isProcessingWrites = false;
         return;
@@ -576,6 +577,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
       if (dirtyPages.size > 0 && this.#dbFileHandle) {
         for (const pageIndex of dirtyPages.keys()) {
           writeFileLength = await this.#processOpfsPage(pageIndex, memSqliteFile, writable, writeFileLength);
+          writtenPageCount++;
         }
       }
       
@@ -584,11 +586,11 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
         await writable.close();
       }
     } catch (e) {
-      console.error(`Failed to process operation queue: ${e.message}`);
+      console.error(`MemoryDelayedOPFSVFS | Failed to process operation queue: ${e.message}`);
     } finally {
       this.#isProcessingWrites = false;
       const end = performance.now();
-      console.log(`Processed writes in ${(end - start).toFixed(2)} ms`);
+      console.log(`MemoryDelayedOPFSVFS | Wrote ${writtenPageCount} pages in ${(end - start).toFixed(2)} ms`);
 
       // If more operations were added while processing, start again
       if (this.#writeQueue.length > 0) {
@@ -689,9 +691,9 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
         await this.#clearPageMetas();
       }
       
-      console.log(`Deleted OPFS file`);
+      console.log(`MemoryDelayedOPFSVFS | Deleted OPFS file`);
     } catch (e) {
-      console.error(`Failed to delete OPFS file: ${e.message}`);
+      console.error(`MemoryDelayedOPFSVFS | Failed to delete OPFS file: ${e.message}`);
     }
   }
 
@@ -699,7 +701,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
    * Process all pending operations and close the VFS
    */
   close() {
-    // console.log("MemoryDelayedOPFSVFS.close()");
+    // console.log("MemoryDelayedOPFSVFS | MemoryDelayedOPFSVFS.close()");
 
     // Close all open files
     for (const fileId of this.mapIdToFile.keys()) {
@@ -718,7 +720,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
    * @returns {number}
    */
   jOpen(filename, fileId, flags, pOutFlags) {
-    // console.log(`MemoryDelayedOPFSVFS.jOpen(${filename}, ${fileId}, ${flags})`);
+    // console.log(`MemoryDelayedOPFSVFS | MemoryDelayedOPFSVFS.jOpen(${filename}, ${fileId}, ${flags})`);
 
     const url = new URL(
       filename || Math.random().toString(36).slice(2),
@@ -760,7 +762,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
    * @returns {number}
    */
   jClose(fileId) {
-    // console.log(`MemoryDelayedOPFSVFS.jClose(${fileId})`);
+    // console.log(`MemoryDelayedOPFSVFS | MemoryDelayedOPFSVFS.jClose(${fileId})`);
     const file = this.mapIdToFile.get(fileId);
     this.mapIdToFile.delete(fileId);
 
@@ -783,11 +785,11 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
    * @returns {number}
    */
   jRead(fileId, pData, iOffset) {
-    // console.log(`MemoryDelayedOPFSVFS.jRead(${fileId}, ${pData.byteLength}, ${iOffset})`);
+    // console.log(`MemoryDelayedOPFSVFS | jRead(${fileId}, ${pData.byteLength}, ${iOffset})`);
     const file = this.mapIdToFile.get(fileId);
 
     // if (this.#isTrackedDbFile(file.pathname)) {
-    //   console.log(`MemoryDelayedOPFSVFS.jRead(${iOffset}, ${pData.byteLength})`);
+    //   console.log(`MemoryDelayedOPFSVFS | jRead(${iOffset}, ${pData.byteLength})`);
     // }
 
     // Clip the requested read to the file boundary.
@@ -819,7 +821,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
    * @returns {number}
    */
   jWrite(fileId, pData, iOffset) {
-    // console.log(`MemoryDelayedOPFSVFS.jWrite(${fileId}, ${pData.byteLength}, ${iOffset})`);
+    // console.log(`MemoryDelayedOPFSVFS | jWrite(${fileId}, ${pData.byteLength}, ${iOffset})`);
     const file = this.mapIdToFile.get(fileId);
     if (iOffset + pData.byteLength > file.data.byteLength) {
       // Resize the ArrayBuffer to hold more data.
@@ -838,7 +840,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
 
     // If this is our database file, queue only the changed page for writing to OPFS
     if (this.#isTrackedDbFile(file.pathname)) {
-      // console.log(`MemoryDelayedOPFSVFS.jWrite(${iOffset}, ${pData.byteLength})`);
+      // console.log(`MemoryDelayedOPFSVFS | jWrite(${iOffset}, ${pData.byteLength})`);
       // Queue just the offset and length - the actual data is already in memory
       this.#queueWrite(iOffset, pData.byteLength);
     }
@@ -852,7 +854,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
    * @returns {number}
    */
   jTruncate(fileId, iSize) {
-    // console.log(`Truncating file ${fileId} to ${iSize} bytes`);
+    // console.log(`MemoryDelayedOPFSVFS | Truncating file ${fileId} to ${iSize} bytes`);
     const file = this.mapIdToFile.get(fileId);
 
     // For simplicity we don't make the ArrayBuffer smaller.
@@ -872,7 +874,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
    * @returns {number}
    */
   jFileSize(fileId, pSize64) {
-    // console.log(`MemoryDelayedOPFSVFS.jFileSize(${fileId})`);
+    // console.log(`MemoryDelayedOPFSVFS | jFileSize(${fileId})`);
     const file = this.mapIdToFile.get(fileId);
 
     pSize64.setBigInt64(0, BigInt(file.size), true);
@@ -885,7 +887,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
    * @returns {number}
    */
   jDelete(name, syncDir) {
-    // console.log(`MemoryDelayedOPFSVFS.jDelete(${name})`);
+    // console.log(`MemoryDelayedOPFSVFS | jDelete(${name})`);
     const url = new URL(name, "file://");
     const pathname = url.pathname;
 
@@ -906,7 +908,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
    * @returns {number}
    */
   jAccess(name, flags, pResOut) {
-    // console.log(`MemoryDelayedOPFSVFS.jAccess(${name}, ${flags})`);
+    // console.log(`MemoryDelayedOPFSVFS | jAccess(${name}, ${flags})`);
     const url = new URL(name, "file://");
     const pathname = url.pathname;
 
