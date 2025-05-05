@@ -5,23 +5,17 @@ export async function buildEncryptionKey(fromPassword) {
   // Initialize encryption key from password
   const encoder = new TextEncoder();
   const passwordData = encoder.encode(fromPassword);
-  
+
   // Derive a key from the password
-  const keyMaterial = await crypto.subtle.importKey(
-    "raw",
-    passwordData,
-    "PBKDF2",
-    false,
-    ["deriveBits", "deriveKey"]
-  );
-  
+  const keyMaterial = await crypto.subtle.importKey("raw", passwordData, "PBKDF2", false, ["deriveBits", "deriveKey"]);
+
   // Use PBKDF2 to derive a key
   return await crypto.subtle.deriveKey(
     {
       name: "PBKDF2",
       salt: encoder.encode("wa-sqlite-encrypted-vfs"),
       iterations: 100000,
-      hash: "SHA-256"
+      hash: "SHA-256",
     },
     keyMaterial,
     { name: "AES-GCM", length: 256 },
@@ -77,21 +71,21 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
 
   // Buffer for loaded OPFS data (not immediately added to mapNameToFile)
   /** @type {ArrayBuffer} */ #opfsDataBuffer = null;
-  
+
   /** @type {string} */ #encryptionPassword = null;
   /** @type {CryptoKey} */ #encryptionKey = null;
-  
+
   // In-memory PageMeta storage (maps OPFS page index to encryption/plaintext metadata)
   /** @type {Map<number, PageMeta>} */ #pages = new Map();
-  
+
   // IDB database for page metadata storage
   /** @type {IDBDatabase} */ #idb = null;
 
   /**
-   * @param {string} name 
+   * @param {string} name
    * @param {*} module
    * @param {{key?: CryptoKey, dbName?: string, opfsPageSize?: number}} options - Optional encryption key and configuration
-   * @returns 
+   * @returns
    */
   static async create(name, module, options = {}) {
     const vfs = new MemoryDelayedOPFSVFS(name, module, options);
@@ -100,10 +94,10 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
   }
 
   /**
-   * @param {string} name 
+   * @param {string} name
    * @param {*} module
    * @param {{encryptionPassword?: string, dbName?: string, opfsPageSize?: number}} options
-   * @returns 
+   * @returns
    */
   constructor(name, module, options) {
     super(name, module);
@@ -113,7 +107,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
       this.#opfsPageSize = options.opfsPageSize;
     }
 
-    this.#vfsReady = this.init()
+    this.#vfsReady = this.init();
     // console.log("MemoryDelayedOPFSVFS constructor complete")
   }
 
@@ -128,8 +122,8 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
     }
     // Initialize IndexedDB first (so we have the IVs), then OPFS (where we decrypt the existing db)
     // console.log("MemoryDelayedOPFSVFS constructor about to call initIndexedDb")
-    await this.#initIndexedDb()
-    await this.#initOpfs()
+    await this.#initIndexedDb();
+    await this.#initOpfs();
     return true;
   }
 
@@ -138,15 +132,15 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
    * @param {Uint8Array} data - Data to encrypt
    * @returns {Promise<{encryptedData: Uint8Array, iv: Uint8Array}>}
    */
-  async #encryptData(data) { 
+  async #encryptData(data) {
     // Generate a random IV
     const iv = crypto.getRandomValues(new Uint8Array(12)); // 12 bytes is recommended for AES-GCM
-    
+
     // Encrypt the data
     const encryptedBuffer = await crypto.subtle.encrypt(
       {
-        name: 'AES-GCM',
-        iv
+        name: "AES-GCM",
+        iv,
       },
       this.#encryptionKey,
       data
@@ -156,7 +150,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
     // Return both the encrypted data and the IV
     return {
       encryptedData: encryptedData,
-      iv
+      iv,
     };
   }
 
@@ -170,13 +164,13 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
     // Decrypt the data
     const decryptedBuffer = await crypto.subtle.decrypt(
       {
-        name: 'AES-GCM',
-        iv
+        name: "AES-GCM",
+        iv,
       },
       this.#encryptionKey,
       encryptedData
     );
-    
+
     // Return the decrypted data
     const decrypted = new Uint8Array(decryptedBuffer);
     return decrypted;
@@ -192,54 +186,49 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
       return encryptedData;
     }
 
-    console.log(`MemoryDelayedOPFSVFS | Decrypting ${encryptedData.byteLength} bytes from OPFS, with ${this.#pages.size} OPFS pages`);
-    
     // Calculate the size needed for the decrypted buffer
     // We need to find the highest page index and determine its end offset
     let maxPlainEnd = 0;
-    
+
     for (const [pageIndex, pageEntry] of this.#pages.entries()) {
       const pageEnd = this.#getOpfsPageEnd(pageIndex);
       if (pageEnd > maxPlainEnd) {
         maxPlainEnd = pageEnd;
       }
     }
-    
+
     // Create a new buffer for the decrypted data with the correct size
     const decryptedBuffer = new ArrayBuffer(maxPlainEnd);
     const decryptedView = new Uint8Array(decryptedBuffer);
-    
+
     // Sort page indices for sequential processing
     const pageIndices = Array.from(this.#pages.keys()).sort((a, b) => a - b);
-    
+
     // Decrypt each page and write it to the right location in the buffer
     for (const pageIndex of pageIndices) {
       const pageEntry = this.#pages.get(pageIndex);
       const pageStart = this.#getOpfsPageStart(pageIndex);
       const { offset: encOffset, length: encLength, iv } = pageEntry.encData;
-      
+
       if (encOffset === undefined || encLength === undefined || !iv) {
         console.warn(`MemoryDelayedOPFSVFS | Missing encryption data for page ${pageIndex}`);
         continue;
       }
-      
+
       try {
         // Extract the encrypted data
         const encryptedChunk = new Uint8Array(encryptedData, encOffset, encLength);
-        
+
         // Decrypt the data
         const decryptedChunk = await this.#decryptData(encryptedChunk, iv);
-        
+
         // Copy the decrypted data to the output buffer
-        decryptedView.set(
-          new Uint8Array(decryptedChunk.buffer, 0, decryptedChunk.byteLength), 
-          pageStart
-        );
+        decryptedView.set(new Uint8Array(decryptedChunk.buffer, 0, decryptedChunk.byteLength), pageStart);
       } catch (e) {
         console.error(`MemoryDelayedOPFSVFS | Error decrypting page ${pageIndex}`, e);
       }
     }
-    
+
     console.log(`MemoryDelayedOPFSVFS | Finished decrypting file, produced ${maxPlainEnd} bytes of plaintext`);
     return decryptedBuffer;
   }
@@ -249,10 +238,9 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
       // Get a handle to the file in OPFS (creating if necessary)
       this.#rootDir = await navigator.storage.getDirectory();
       const filenameInOpfs = this.#encryptionKey ? `${this.#dbName}.enc` : this.#dbName;
-      this.#dbFileHandle = await this.#rootDir.getFileHandle(
-        filenameInOpfs,
-        { create: true }
-      );
+      this.#dbFileHandle = await this.#rootDir.getFileHandle(filenameInOpfs, {
+        create: true,
+      });
 
       // Load existing data from OPFS
       this.#opfsDataBuffer = await this.#readFileFromOPFS();
@@ -272,7 +260,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
     // Decrypt the file if encryption is enabled and we have data
     if (encryptedData.byteLength > 0 && this.#encryptionKey) {
       try {
-      return await this.#decryptFile(encryptedData);
+        return await this.#decryptFile(encryptedData);
       } catch (e) {
         if (e instanceof DOMException && e.name === "OperationError") {
           console.error("MemoryDelayedOPFSVFS | Incorrect encryption key or corrupted data");
@@ -286,7 +274,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
       return encryptedData;
     }
   }
-  
+
   /**
    * Execute an IndexedDB transaction and return the result
    * @param {IDBTransactionMode} mode - Transaction mode ('readonly' or 'readwrite')
@@ -297,48 +285,47 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
     if (!this.#idb) {
       throw new Error("IndexedDB not initialized");
     }
-    
+
     return new Promise((resolve, reject) => {
       const tx = this.#idb.transaction("pages", mode);
       const store = tx.objectStore("pages");
-      
+
       const request = operation(store);
-      
+
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
   }
 
   async #initIndexedDb() {
-      // Initialize IndexedDB for page storage
-      this.#idb = await new Promise((resolve, reject) => {
+    // Initialize IndexedDB for page storage
+    this.#idb = await new Promise((resolve, reject) => {
+      const indexedDbName = `MemoryDelayedOPFSVFS-${this.#dbName}${this.#encryptionKey ? "-enc" : ""}`;
+      const request = indexedDB.open(indexedDbName, 1);
+      request.onupgradeneeded = (event) => {
+        const db = request.result;
+        db.createObjectStore("pages", { keyPath: "pageIndex" });
+      };
+      request.onsuccess = () => {
+        resolve(request.result);
+      };
+      request.onerror = () => {
+        reject(request.error);
+      };
+    });
 
-        const indexedDbName = `MemoryDelayedOPFSVFS-${this.#dbName}${this.#encryptionKey ? '-enc' : ''}`;
-        const request = indexedDB.open(indexedDbName, 1);
-        request.onupgradeneeded = (event) => {
-          const db = request.result;
-          db.createObjectStore('pages', { keyPath: 'pageIndex' });
-        };
-        request.onsuccess = () => {
-          resolve(request.result);
-        }
-        request.onerror = () => {
-          reject(request.error);
-        }
-      });
-      
-      // Load the pages from IndexedDB
-      await this.#loadPageMetas();
-      return true;
+    // Load the pages from IndexedDB
+    await this.#loadPageMetas();
+    return true;
   }
-  
+
   /**
    * Load pages from IndexedDB
    */
   async #loadPageMetas() {
     try {
-      const result = await this.#executeIDBTransaction('readonly', store => store.getAll());
-      
+      const result = await this.#executeIDBTransaction("readonly", (store) => store.getAll());
+
       // Populate the pages map
       for (const entry of result) {
         this.#pages.set(entry.pageIndex, entry);
@@ -347,7 +334,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
       console.error(`MemoryDelayedOPFSVFS | Failed to load pages from IndexedDB: ${e.message}`);
     }
   }
-  
+
   /**
    * Save page data to IndexedDB
    * @param {number} pageIndex - The page index
@@ -357,45 +344,45 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
    */
   async #savePageMeta(pageIndex, encOffset, encLength, iv) {
     // Create the page entry
-    const entry = { 
+    const entry = {
       pageIndex,
       encData: {
         offset: encOffset,
         length: encLength,
-        iv
-      }
+        iv,
+      },
     };
 
     try {
-      await this.#executeIDBTransaction('readwrite', store => store.put(entry));
+      await this.#executeIDBTransaction("readwrite", (store) => store.put(entry));
       this.#pages.set(pageIndex, entry);
     } catch (e) {
       console.error(`MemoryDelayedOPFSVFS | Failed to save page to IndexedDB: ${e.message}`, entry);
     }
   }
-  
+
   /**
    * Delete a page from IndexedDB
    * @param {number} pageIndex - The page index to delete
    */
   async #deletePageMeta(pageIndex) {
     try {
-      await this.#executeIDBTransaction('readwrite', store => store.delete(pageIndex));
-      
+      await this.#executeIDBTransaction("readwrite", (store) => store.delete(pageIndex));
+
       // Remove from memory too
       this.#pages.delete(pageIndex);
     } catch (e) {
       console.error(`MemoryDelayedOPFSVFS | Failed to delete page ${pageIndex} from IndexedDB: ${e.message}`);
     }
   }
-  
+
   /**
    * Clear all pages from IndexedDB
    */
   async #clearPageMetas() {
     try {
-      await this.#executeIDBTransaction('readwrite', store => store.clear());
-      
+      await this.#executeIDBTransaction("readwrite", (store) => store.clear());
+
       // Clear memory too
       this.#pages.clear();
     } catch (e) {
@@ -448,7 +435,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
    */
   #getAffectedOpfsPageRange(offset, length) {
     if (length === 0) return { startPageIndex: 0, endPageIndex: -1 }; // Empty range
-    
+
     const startPageIndex = this.#getOpfsPageIndex(offset);
     const endPageIndex = this.#getOpfsPageIndex(offset + length - 1);
     return { startPageIndex, endPageIndex };
@@ -507,11 +494,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
    * Process all pending operations in the queue using page-aligned writes
    */
   async #processWriteQueue() {
-    if (
-      this.#isProcessingWrites ||
-      this.#writeQueue.length === 0 ||
-      !this.#dbFileHandle
-    ) {
+    if (this.#isProcessingWrites || this.#writeQueue.length === 0 || !this.#dbFileHandle) {
       return;
     }
 
@@ -524,58 +507,56 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
       // Find the in-memory database file object from the mapNameToFile
       const memSqliteFile = this.mapNameToFile.get(`/${this.#dbName}`);
       if (!memSqliteFile) {
-        console.error(
-          `MemoryDelayedOPFSVFS | Cannot find file /${this.#dbName} in mapNameToFile`
-        );
+        console.error(`MemoryDelayedOPFSVFS | Cannot find file /${this.#dbName} in mapNameToFile`);
         this.#isProcessingWrites = false;
         return;
       }
 
       // Create a writable stream to the OPFS file
-      const writable = await this.#dbFileHandle.createWritable({ keepExistingData: true });
+      const writable = await this.#dbFileHandle.createWritable({
+        keepExistingData: true,
+      });
       let writeFileLength = (await this.#dbFileHandle.getFile()).size;
 
       const operations = this.#writeQueue.splice(0);
-      
+
       // Track dirty pages that need to be written
       /** @type {Set<number>} */ let dirtyPages = new Set();
-      
+
       // Process all operations in order
       for (const operation of operations) {
         if (operation.type === "write") {
           // Collect the affected pages for this write
           const { offset, length } = operation;
           const { startPageIndex, endPageIndex } = this.#getAffectedOpfsPageRange(offset, length);
-          
+
           // Mark each affected page as dirty
           for (let pageIndex = startPageIndex; pageIndex <= endPageIndex; pageIndex++) {
             dirtyPages.add(pageIndex);
           }
-        } 
-        else if (operation.type === "truncate") {
+        } else if (operation.type === "truncate") {
           const size = operation.size;
           const truncatePageIndex = this.#getOpfsPageIndex(size);
-          
+
           // Filter out completely truncated pages, keeping only pages within the new file size
           Array.from(dirtyPages).forEach((pageIndex) => {
-              // Remove any pages that are completely truncated
-              if (pageIndex > truncatePageIndex) {
-                dirtyPages.delete(pageIndex);
-              }
-          })
-          
+            // Remove any pages that are completely truncated
+            if (pageIndex > truncatePageIndex) {
+              dirtyPages.delete(pageIndex);
+            }
+          });
+
           this.#processTruncateOperation(size, writable);
-        } 
-        else if (operation.type === "delete") {
+        } else if (operation.type === "delete") {
           // Discard all dirty pages - no need to write before deletion
           dirtyPages.clear();
           this.#processDeleteOperation(writable);
-          
+
           // Operations after a delete would be for a new file, so exit the loop
           break;
         }
       }
-      
+
       // Write any remaining dirty pages
       if (dirtyPages.size > 0 && this.#dbFileHandle) {
         for (const pageIndex of dirtyPages.keys()) {
@@ -583,7 +564,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
           writtenPageCount++;
         }
       }
-      
+
       // Close writable if we still have one
       if (this.#dbFileHandle) {
         await writable.close();
@@ -601,7 +582,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
       }
     }
   }
-  
+
   /**
    * Process a single OPFS page
    * @param {number} pageIndex - The OPFS page index
@@ -614,13 +595,16 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
     // Calculate the page boundaries in the SQLite file
     const pageStart = this.#getOpfsPageStart(pageIndex);
     const plainData = new Uint8Array(this.#opfsPageSize);
-    
+
     // Calculate how much actual data we can copy from the source
-    const availableData = Math.max(0, Math.min(
-      this.#opfsPageSize,                     // Don't exceed page size
-      memSqliteFile.size - pageStart          // Don't read past end of file
-    ));
-    
+    const availableData = Math.max(
+      0,
+      Math.min(
+        this.#opfsPageSize, // Don't exceed page size
+        memSqliteFile.size - pageStart // Don't read past end of file
+      )
+    );
+
     if (availableData > 0) {
       const sourceData = new Uint8Array(memSqliteFile.data, pageStart, availableData);
       plainData.set(sourceData, 0);
@@ -629,11 +613,11 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
     if (this.#encryptionKey) {
       // Encrypt the page
       const { encryptedData, iv } = await this.#encryptData(plainData);
-      
+
       // Determine where to write the encrypted page
       let encOffset;
       const existingPage = this.#pages.get(pageIndex);
-      
+
       if (existingPage) {
         // Reuse the existing location if we've written this page before
         encOffset = existingPage.encData.offset;
@@ -642,14 +626,16 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
         encOffset = writeFileLength;
         writeFileLength += encryptedData.byteLength;
       }
-      
+      // console.log(`MemoryDelayedOPFSVFS | Writing page ${pageIndex} (from ${pageStart} in plain), plain data:`, encryptedData, plainData);
+      // console.log(`MemoryDelayedOPFSVFS | Writing page ${pageIndex} to ${encOffset}, ${encryptedData.byteLength})`, encryptedData);
+
       // Write the encrypted page to OPFS
       await writable.seek(encOffset);
       await writable.write(encryptedData);
-      
+
       // Save the page metadata
       await this.#savePageMeta(pageIndex, encOffset, encryptedData.byteLength, iv);
-      
+
       return writeFileLength;
     } else {
       // For unencrypted storage, write directly at the page-aligned offset
@@ -659,7 +645,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
       return Math.max(writeFileLength, pageStart + this.#opfsPageSize);
     }
   }
-  
+
   /**
    * Process a truncate operation (used for direct truncate calls only)
    * @param {number} size - The new size of the unencrypted SQLite file, in bytes
@@ -669,23 +655,20 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
     if (this.#encryptionKey) {
       // For encrypted storage, delete pages after truncation point
       const truncatePageIndex = this.#getOpfsPageIndex(size);
-      const pagesToDelete = Array.from(this.#pages.keys()).filter(
-        pageIdx => pageIdx > truncatePageIndex
-      );
-      
+      const pagesToDelete = Array.from(this.#pages.keys()).filter((pageIdx) => pageIdx > truncatePageIndex);
+
       for (const pageIdx of pagesToDelete) {
         await this.#deletePageMeta(pageIdx);
       }
 
       // as the pages may be written to OPFS out-of-order, we cannot truncate the file
       // space can be reclaimed by VACUUM
-
     } else {
       // For unencrypted storage, just truncate the file
       await writable.truncate(size);
     }
   }
-  
+
   /**
    * Process a delete operation (used for direct delete calls only)
    * @param {FileSystemWritableFileStream} writable - The OPFS writable stream
@@ -695,12 +678,12 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
       // Delete the file from OPFS
       await this.#rootDir.removeEntry(this.#dbName);
       this.#dbFileHandle = null;
-      
+
       // Clear all page metadata
       if (this.#encryptionKey) {
         await this.#clearPageMetas();
       }
-      
+
       console.log(`MemoryDelayedOPFSVFS | Deleted OPFS file`);
     } catch (e) {
       console.error(`MemoryDelayedOPFSVFS | Failed to delete OPFS file: ${e.message}`);
@@ -732,10 +715,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
   jOpen(filename, fileId, flags, pOutFlags) {
     // console.log(`MemoryDelayedOPFSVFS | MemoryDelayedOPFSVFS.jOpen(${filename}, ${fileId}, ${flags})`);
 
-    const url = new URL(
-      filename || Math.random().toString(36).slice(2),
-      "file://"
-    );
+    const url = new URL(filename || Math.random().toString(36).slice(2), "file://");
     const pathname = url.pathname;
 
     let file = this.mapNameToFile.get(pathname);
@@ -810,7 +790,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
     if (nBytes) {
       // Read data from memory
       const data = new Uint8Array(file.data, bgn, nBytes);
-      
+
       // Data in memory is already decrypted (we decrypt on load and encrypt on write)
       // so we can just copy it directly
       pData.set(data);
@@ -835,10 +815,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
     const file = this.mapIdToFile.get(fileId);
     if (iOffset + pData.byteLength > file.data.byteLength) {
       // Resize the ArrayBuffer to hold more data.
-      const newSize = Math.max(
-        iOffset + pData.byteLength,
-        2 * file.data.byteLength
-      );
+      const newSize = Math.max(iOffset + pData.byteLength, 2 * file.data.byteLength);
       const data = new ArrayBuffer(newSize);
       new Uint8Array(data).set(new Uint8Array(file.data, 0, file.size));
       file.data = data;
@@ -926,10 +903,7 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
     const fileExists = this.mapNameToFile.has(pathname);
 
     // If not found in memory and this is our database file, check if we have a buffered version
-    const isBufferedDb =
-      !fileExists &&
-      pathname === `/${this.#dbName}` &&
-      this.#opfsDataBuffer !== null;
+    const isBufferedDb = !fileExists && pathname === `/${this.#dbName}` && this.#opfsDataBuffer !== null;
 
     // A file exists if it's either in memory or in our buffer
     pResOut.setInt32(0, fileExists || isBufferedDb ? 1 : 0, true);
