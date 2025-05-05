@@ -483,9 +483,17 @@ export class MemoryDelayedOPFSVFS extends FacadeVFS {
     this.#triggerWrites();
   }
 
+  // Track the last time we scheduled a write queue processing
+  #lastTriggerTimestamp = 0;
+
   #triggerWrites() {
-    // Start processing if not already processing
-    if (!this.#isProcessingWrites) {
+    const now = Date.now();
+    
+    // Start processing if not already processing and we're not throttling
+    if (!this.#isProcessingWrites && (now - this.#lastTriggerTimestamp >= 10)) {
+      // Update the trigger timestamp
+      this.#lastTriggerTimestamp = now;
+      
       // Use setTimeout to make this truly asynchronous and non-blocking
       setTimeout(() => this.#processWriteQueue(), 0);
     }
