@@ -1,6 +1,7 @@
 // Copyright 2024 Roy T. Hashimoto. All Rights Reserved.
 
 import * as SQLite from '../src/sqlite-api.js';
+import sampleQueries from './hammel-db-setup.queries.js';
 
 // This is the path to the Monaco editor distribution. For development
 // this loads from the local server (uses Yarn 2 path).
@@ -94,6 +95,10 @@ async function initSQLite() {
     const end = performance.now();
     console.log(`SQLite opened ${dbName} in ${(end - start).toFixed(2)} ms`);
 
+    sqlite3.syncExec(db, 'PRAGMA cache_size=-64000');
+    sqlite3.syncExec(db, 'PRAGMA journal_mode=MEMORY');
+    sqlite3.syncExec(db, 'PRAGMA page_size=4096');
+
     // Return success
     document.getElementById('output').innerHTML =
       JSON.stringify([...new URLSearchParams(location.search).entries()]);
@@ -134,10 +139,42 @@ function executeSQL(query) {
   }
 }
 
+function executeSingleQuery(sql, queryArguments) {
+  try {
+    const statements = sqlite3.syncStatements(db, sql, { unscoped: true });
+
+    // we expect only a single statement in each query
+    const statementsArray = Array.from(statements);
+    const stmt = statementsArray[0];
+
+    // Bind parameters if provided
+    if (queryArguments && queryArguments.length > 0) {
+        sqlite3.bind_collection(stmt, queryArguments);
+    }
+
+    let columnNames;
+    const rows = [];
+    while (sqlite3.syncStep(stmt) === SQLite.SQLITE_ROW) {
+        const rowData = sqlite3.row(stmt);
+        columnNames = columnNames ?? sqlite3.column_names(stmt);
+        rows.push(rowData);
+    }
+
+    const rowsModified = sqlite3.changes(db);
+
+    // release the statement handle
+    sqlite3.syncFinalize(stmt);
+  } catch (e) {
+    console.error(`Error with SQL statement ${sql}`, e);
+    throw e;
+  }
+}
+
 async function init() {
   // Load the Monaco editor
   const executeButton = /** @type {HTMLButtonElement} */(document.getElementById('execute'));
   const executeFileButton = /** @type {HTMLButtonElement} */(document.getElementById('execute-file'));
+  const runSampleButton = /** @type {HTMLButtonElement} */(document.getElementById('run-sample-queries'));
   const fileInput = /** @type {HTMLInputElement} */(document.getElementById('sql-file'));
   const fileInfo = document.getElementById('sql-file-info');
   
@@ -172,6 +209,44 @@ async function init() {
     executeButton.disabled = false;
     executeFileButton.disabled = false;
   }
+
+  runSampleButton.addEventListener('click', async function() {
+    runSampleButton.disabled = true;
+    const timestamp = document.getElementById('timestamp');
+    timestamp.textContent = new Date().toLocaleTimeString();
+    const timing = [
+      ["start", performance.now()],
+    ]
+
+    for (let i = 0; i < sampleQueries.length; i++) {
+      if (sampleQueries[i]["checkpoint"]) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        timing.push([sampleQueries[i]["checkpoint"], performance.now()]);
+      }
+
+      const query = sampleQueries[i]["query"];
+      const params = sampleQueries[i]["params"];
+      executeSingleQuery(query, params);
+
+      // sleep for 10ms every 1000 queries
+      if (i % 1000 === 0) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    }
+    timing.push(["end", performance.now()]);
+    
+    const periods = {};
+    for (let i = 0; i < timing.length - 1; i++) {
+      const name = timing[i][0];
+      const start = timing[i][1];
+      const end = timing[i + 1][1];
+      periods[name] = `${(end - start).toFixed(1)}ms`;
+    }
+    const totalDuration = timing[timing.length - 1][1] - timing[0][1];
+
+    timestamp.textContent = ` ${(totalDuration).toFixed(1)} msec (periods: ${JSON.stringify(periods, null, 2)})`;
+    runSampleButton.disabled = false;
+  });
 
   // Handle file selection
   fileInput.addEventListener('change', function() {
