@@ -27,9 +27,12 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
   #AUTH_TAG_SIZE = 16; // GCM authentication tag size
   #opfsPageSize = this.#sourcePageSize + this.#IV_SIZE + this.#AUTH_TAG_SIZE;
   
+  // Write queue constants
+  #maxWriteChunks = 500; // Maximum number of operations to process in one batch
+  
   // Write queue for OPFS operations
   #writeQueue = [];
-  #processingWritesActive = false;
+  #activeWrites = []; // Operations currently being processed
   
   /**
    * Initialize the worker with configuration
@@ -118,15 +121,19 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
   /**
    * Process the write queue to persist changes to OPFS
    * Required implementation from BaseWriteWorker
+   * This implementation is designed to be resilient against file corruption
+   * and worker termination by:
+   * 1. Keeping track of active writes until they are fully committed
+   * 2. Processing writes in limited-size batches
+   * 3. Handling unexpected errors gracefully
    */
   async processWriteQueue() {
-    if (this.#processingWritesActive || this.#writeQueue.length === 0 || !this.#dbFileHandle) {
+    // If nothing to process, exit early
+    if (this.#activeWrites.length === 0 && this.#writeQueue.length === 0) {
       return;
     }
 
-    this.#processingWritesActive = true;
     const start = performance.now();
-    console.log(`EncryptedOPFSWorker | Processing ${this.#writeQueue.length} write operations`);
     let writtenPageCount = 0;
 
     try {
@@ -135,16 +142,25 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
         keepExistingData: true,
       });
 
-      const operations = this.#writeQueue.splice(0);
+      // If we have pending active writes from a previous interrupted operation,
+      // process those first before taking new operations from the queue
+      if (this.#activeWrites.length === 0) {
+        // Take a limited batch of operations from the queue
+        this.#activeWrites = this.#writeQueue.splice(0, this.#maxWriteChunks);
+        console.log(`EncryptedOPFSWorker | Processing ${this.#activeWrites.length} write operations (${this.#writeQueue.length} remaining in queue)`);
+      } else {
+        console.log(`EncryptedOPFSWorker | Resuming processing of ${this.#activeWrites.length} previously active write operations`);
+      }
 
       // Track dirty pages that need to be written
       /** @type {Set<number>} */ 
       let dirtyPages = new Set();
 
       // Process all operations in order
-      for (const operation of operations) {
+      for (const operation of this.#activeWrites) {       
         if (operation.type === "page") {
           dirtyPages.add(operation.pageIndex);
+
         } else if (operation.type === "truncate") {
           const size = operation.size;
           const truncatePageIndex = this.#getPageIndex(size);
@@ -158,35 +174,39 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
 
           await this.#processTruncateOperation(size, writable);
         } else if (operation.type === "delete") {
-          // Discard all dirty pages - no need to write before deletion
           dirtyPages.clear();
+          
           await this.#processDeleteOperation(writable);
-
-          // Operations after a delete would be for a new file, so exit the loop
+          // Need to create a new writable after delete
+          writable = null;
+          // Operations after a delete would be for a new file, so we'll break the loop after this
           break;
         }
       }
 
       // Write all dirty pages
-      if (dirtyPages.size > 0 && this.#dbFileHandle) {
-        for (const pageIndex of dirtyPages.keys()) {
+      if (dirtyPages.size > 0) {
+        for (const pageIndex of dirtyPages) {
           await this.#processPage(pageIndex, writable);
           writtenPageCount++;
         }
       }
 
-      // Close writable
+      // All operations processed successfully
+      this.#activeWrites = [];
       await writable.close();
+
     } catch (e) {
       console.error(`EncryptedOPFSWorker | Failed to process operation queue: ${e.message}`);
+      // Note: We don't clear activeWrites here so they can be retried on next call
     } finally {
-      this.#processingWritesActive = false;
+      // we intentionally do not close the writable here - if an error occurred we don't want to commit the partial state
       const end = performance.now();
       console.log(`EncryptedOPFSWorker | Wrote ${writtenPageCount} pages in ${(end - start).toFixed(2)} ms`);
 
-      // If more operations were added while processing, start again
-      if (this.#writeQueue.length > 0) {
-        setTimeout(() => this.processWriteQueue(), 0);
+      // If there are more operations in the queue, continue processing
+      if (this.#writeQueue.length > 0 || this.#activeWrites.length > 0) {
+        await this.processWriteQueue();
       }
     }
   }
