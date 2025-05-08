@@ -54,6 +54,13 @@ const searchParams = new URLSearchParams(location.search);
       encryptionPassword: searchParams.get('password') || 'abcd123'
     }
   },
+  {
+    name: 'SyncMemoryProxyAsyncWorkerVFS',
+    vfsModule: '../src/examples/SyncMemoryProxyAsyncWorkerVFS.js',
+    vfsOptions: { 
+      encryptionPassword: searchParams.get('password') || 'abcd123'
+    }
+  }
 ].map(config => [config.name, config]));
 
 // SQLite instance and database connection
