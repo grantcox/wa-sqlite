@@ -87,7 +87,7 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
   async init(config) {
     try {
       // Create worker for persistence operations
-      this.#worker = new Worker(new URL('./EncryptedPermutedOPFSWorker.js', import.meta.url), { 
+      this.#worker = new Worker(new URL('./EncryptedIndexedDbWorker.js', import.meta.url), { 
         type: 'module' 
       });
 
