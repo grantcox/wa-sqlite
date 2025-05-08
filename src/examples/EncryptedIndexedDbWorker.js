@@ -15,15 +15,14 @@ import { BaseWriteWorker } from './BaseWriteWorker.js';
  */
 
 /**
- * Worker implementation that persists data to IndexedDB with optional encryption
+ * Worker implementation that persists data to IndexedDB with mandatory encryption
  * Extends the BaseWriteWorker to handle ordered operations with IndexedDB-specific persistence
  */
 class EncryptedIndexedDbWorker extends BaseWriteWorker {
   // IndexedDB state
   #idb = null;
   
-  // Encryption state
-  #encryptionKey = null;
+  // Using encryption key from base class via getEncryptionKey()
   
   // Configuration
   #dbName = "db.sqlite";
@@ -43,32 +42,26 @@ class EncryptedIndexedDbWorker extends BaseWriteWorker {
   
   /**
    * Initialize the worker with configuration
-   * @param {Object} config Worker configuration
+   * @param {VFSConfig} config Worker configuration
    * @returns {Promise<ArrayBuffer>} Initial file data
    */
   async init(config) {
     try {
       this.#dbName = config.dbName || "db.sqlite";
-      
-      // Initialize encryption if password provided
-      if (config.encryptionPassword) {
-        this.#encryptionKey = await this.#buildEncryptionKey(config.encryptionPassword);
-      }
-      
-      // Set page size if provided
       if (config.pageSize) {
         this.#pageSize = config.pageSize;
       }
+
+      if (!this.getEncryptionKey()) {
+        throw new Error("Encryption key not initialized in base class");
+      }
       
       // Initialize IndexedDB and load data
-      await this.#initIndexedDb(this.#dbName, !!this.#encryptionKey);
+      await this.#initIndexedDb(this.#dbName);
       const fileData = await this.#loadFileData();
-      
-      // Set the initial file data in base class
       this.setFileData(fileData);
       
       console.log(`EncryptedIndexedDbWorker | Initialized with ${fileData.byteLength} bytes of data`);
-      return fileData;
     } catch (e) {
       console.error('EncryptedIndexedDbWorker | Initialization failed:', e);
       throw e;
@@ -200,33 +193,6 @@ class EncryptedIndexedDbWorker extends BaseWriteWorker {
   // Private methods for encryption
   // --------------------------------------------------------------------------
 
-  /**
-   * Initialize the encryption key from password
-   * @param {string} fromPassword - Password to derive key from
-   * @returns {Promise<CryptoKey>} - The derived encryption key
-   */
-  async #buildEncryptionKey(fromPassword) {
-    // Initialize encryption key from password
-    const encoder = new TextEncoder();
-    const passwordData = encoder.encode(fromPassword);
-
-    // Derive a key from the password
-    const keyMaterial = await crypto.subtle.importKey("raw", passwordData, "PBKDF2", false, ["deriveBits", "deriveKey"]);
-
-    // Use PBKDF2 to derive a key
-    return await crypto.subtle.deriveKey(
-      {
-        name: "PBKDF2",
-        salt: encoder.encode("wa-sqlite-encrypted-vfs"),
-        iterations: 100000,
-        hash: "SHA-256",
-      },
-      keyMaterial,
-      { name: "AES-GCM", length: 256 },
-      false,
-      ["encrypt", "decrypt"]
-    );
-  }
 
   /**
    * Encrypt data using AES-GCM with a random IV
@@ -237,13 +203,13 @@ class EncryptedIndexedDbWorker extends BaseWriteWorker {
     // Generate a random IV
     const iv = crypto.getRandomValues(new Uint8Array(12)); // 12 bytes is recommended for AES-GCM
 
-    // Encrypt the data
+    // Encrypt the data using key from base class
     const encryptedBuffer = await crypto.subtle.encrypt(
       {
         name: "AES-GCM",
         iv,
       },
-      this.#encryptionKey,
+      this.getEncryptionKey(),
       data
     );
     const encryptedData = new Uint8Array(encryptedBuffer);
@@ -262,13 +228,13 @@ class EncryptedIndexedDbWorker extends BaseWriteWorker {
    * @returns {Promise<Uint8Array>}
    */
   async #decryptData(encryptedData, iv) {
-    // Decrypt the data
+    // Decrypt the data using key from base class
     const decryptedBuffer = await crypto.subtle.decrypt(
       {
         name: "AES-GCM",
         iv,
       },
-      this.#encryptionKey,
+      this.getEncryptionKey(),
       encryptedData
     );
 
@@ -307,14 +273,13 @@ class EncryptedIndexedDbWorker extends BaseWriteWorker {
   /**
    * Initialize IndexedDB for page storage
    * @param {string} dbNameParam - Database name
-   * @param {boolean} isEncrypted - Whether encryption is enabled
    * @returns {Promise<boolean>}
    */
-  async #initIndexedDb(dbNameParam, isEncrypted) {
+  async #initIndexedDb(dbNameParam) {
     try {
       // Initialize IndexedDB for page storage
       this.#idb = await new Promise((resolve, reject) => {
-        const indexedDbName = `EncryptedIndexedDbWorker-${dbNameParam}${isEncrypted ? "-enc" : ""}`;
+        const indexedDbName = `EncryptedIndexedDbWorker-${dbNameParam}-enc`;
         const request = indexedDB.open(indexedDbName, 1);
         
         request.onupgradeneeded = (event) => {
@@ -402,14 +367,8 @@ class EncryptedIndexedDbWorker extends BaseWriteWorker {
         const pageStart = this.#getPageStart(pageIndex);
 
         try {
-          let plainData;
-          if (this.#encryptionKey) {
-            // Decrypt the page
-            plainData = await this.#decryptData(pageData.encryptedData, pageMeta.iv);
-          } else {
-            // No encryption, use data as-is
-            plainData = pageData.encryptedData;
-          }
+          // Decrypt the page (encryption is always enabled)
+          const plainData = await this.#decryptData(pageData.encryptedData, pageMeta.iv);
 
           // Copy the page data to the file buffer
           fileView.set(plainData, pageStart);
@@ -455,19 +414,10 @@ class EncryptedIndexedDbWorker extends BaseWriteWorker {
       plainData.set(sourceData, 0);
     }
 
-    let dataToStore;
-    let iv;
-
-    if (this.#encryptionKey) {
-      // Encrypt the page
-      const encResult = await this.#encryptData(plainData);
-      dataToStore = encResult.encryptedData;
-      iv = encResult.iv;
-    } else {
-      // No encryption, store as-is
-      dataToStore = plainData;
-      iv = new Uint8Array(0); // Empty IV for unencrypted data
-    }
+    // Encrypt the page (encryption is always enabled)
+    const encResult = await this.#encryptData(plainData);
+    const dataToStore = encResult.encryptedData;
+    const iv = encResult.iv;
 
     // Save page metadata
     const pageMeta = {

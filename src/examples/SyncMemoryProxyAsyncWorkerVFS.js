@@ -13,6 +13,7 @@ import * as VFS from "../VFS.js";
  * @typedef {Object} VFSConfig
  * @property {string} encryptionPassword
  * @property {string} dbName
+ * @property {string} workerUrl
  */
 
 /**
@@ -87,17 +88,15 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
   async init(config) {
     try {
       // Create worker for persistence operations
-      this.#worker = new Worker(new URL('./EncryptedIndexedDbWorker.js', import.meta.url), { 
-        type: 'module' 
-      });
+      this.#worker = new Worker(config.workerUrl, { type: 'module' });
 
       // Set up message handler for worker
       const initPromise = new Promise((resolve, reject) => {
         const messageHandler = (event) => {
           const msg = event.data;
           if (msg.type === 'initComplete') {
-            // Store the buffer for later use when opening a file
-            this.#initialData = msg.fileData;
+            // Store the initial data buffer for later use when opening the SQLite database
+            this.#initialData = msg.fileData.buffer;
             this.#worker.removeEventListener('message', messageHandler);
             
             // Set up permanent message handler for ongoing communication
@@ -126,6 +125,24 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
       console.error("SyncMemoryProxyAsyncWorkerVFS | Failed to initialize worker:", e);
       return false;
     }
+  }
+
+  exportDatabase() {
+    // return a copy of the current SQLite database file
+    const file = this.mapNameToFile.get(`/${this.#dbName}`);
+    if (file && file.data) {
+      // create a new ArrayBuffer to hold the copied data
+      const newBuffer = new ArrayBuffer(file.data.byteLength);
+      const sourceView = new Uint8Array(file.data);
+      const newView = new Uint8Array(newBuffer);
+      
+      // Copy all data from original to new buffer
+      newView.set(sourceView);
+      
+      // Return this copied buffer
+      return newBuffer;
+    }
+    return null;
   }
 
   /**
@@ -189,7 +206,6 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
         // so we make a copy, just in case we need to retry this message later
         const dataCopy = new Uint8Array(operation.data.length);
         dataCopy.set(operation.data);
-
         msgOp.data = dataCopy;
         transferBuffers.push(dataCopy.buffer);
       }

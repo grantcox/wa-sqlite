@@ -55,10 +55,19 @@ const searchParams = new URLSearchParams(location.search);
     }
   },
   {
-    name: 'SyncMemoryProxyAsyncWorkerVFS',
+    name: 'SMPAWPermutedVFS',
     vfsModule: '../src/examples/SyncMemoryProxyAsyncWorkerVFS.js',
     vfsOptions: { 
-      encryptionPassword: searchParams.get('password') || 'abcd123'
+      encryptionPassword: searchParams.get('password') || 'abcd123',
+      workerUrl: new URL('../src/examples/EncryptedPermutedOPFSWorker.js', import.meta.url).toString()
+    }
+  },
+  {
+    name: 'SMPAWIndexedDbVFS',
+    vfsModule: '../src/examples/SyncMemoryProxyAsyncWorkerVFS.js',
+    vfsOptions: { 
+      encryptionPassword: searchParams.get('password') || 'abcd123',
+      workerUrl: new URL('../src/examples/EncryptedIndexedDbWorker.js', import.meta.url).toString()
     }
   }
 ].map(config => [config.name, config]));

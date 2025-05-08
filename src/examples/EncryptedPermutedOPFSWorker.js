@@ -14,7 +14,7 @@ import { BaseWriteWorker } from './BaseWriteWorker.js';
  */
 
 /**
- * Worker implementation that persists data to OPFS with optional encryption
+ * Worker implementation that persists data to OPFS with mandatory encryption
  * Extends the BaseWriteWorker to handle ordered operations with OPFS-specific persistence
  */
 class EncryptedPermutedOPFSWorker extends BaseWriteWorker {
@@ -25,8 +25,7 @@ class EncryptedPermutedOPFSWorker extends BaseWriteWorker {
   // IndexedDB state
   #idb = null;
   
-  // Encryption state
-  #encryptionKey = null;
+  // Using encryption key from base class via getEncryptionKey()
   
   // Configuration
   #dbName = "db.sqlite";
@@ -40,38 +39,29 @@ class EncryptedPermutedOPFSWorker extends BaseWriteWorker {
   #writeQueue = [];
   #processingWritesActive = false;
   
-  constructor() {
-    super();
-  }
-  
   /**
    * Initialize the worker with configuration
-   * @param {Object} config Worker configuration
+   * @param {VFSConfig} config Worker configuration
    * @returns {Promise<ArrayBuffer>} Initial file data
    */
   async init(config) {
     try {
       this.#dbName = config.dbName || "db.sqlite";
-      
-      // Initialize encryption if password provided
-      if (config.encryptionPassword) {
-        this.#encryptionKey = await this.#buildEncryptionKey(config.encryptionPassword);
+      if (!this.getEncryptionKey()) {
+        throw new Error("Encryption key not initialized in base class");
       }
       
       // Set page size if provided
-      if (config.opfsPageSize) {
-        this.#opfsPageSize = config.opfsPageSize;
+      if (config.pageSize) {
+        this.#opfsPageSize = config.pageSize;
       }
       
       // Initialize IndexedDB first, then OPFS
-      await this.#initIndexedDb(this.#dbName, !!this.#encryptionKey);
-      const fileData = await this.#initOpfs(this.#dbName, !!this.#encryptionKey);
-      
-      // Set the initial file data in base class
+      await this.#initIndexedDb(this.#dbName);
+      const fileData = await this.#initOpfs(this.#dbName);
       this.setFileData(fileData);
       
       console.log(`EncryptedPermutedOPFSWorker | Initialized with ${fileData.byteLength} bytes of data`);
-      return fileData;
     } catch (e) {
       console.error('EncryptedPermutedOPFSWorker | Initialization failed:', e);
       throw e;
@@ -138,7 +128,6 @@ class EncryptedPermutedOPFSWorker extends BaseWriteWorker {
 
     this.#processingWritesActive = true;
     const start = performance.now();
-    console.log(`EncryptedPermutedOPFSWorker | Processing ${this.#writeQueue.length} write operations`);
     let writtenPageCount = 0;
 
     try {
@@ -211,33 +200,6 @@ class EncryptedPermutedOPFSWorker extends BaseWriteWorker {
   // Private methods for encryption
   // --------------------------------------------------------------------------
 
-  /**
-   * Initialize the encryption key from password
-   * @param {string} fromPassword - Password to derive key from
-   * @returns {Promise<CryptoKey>} - The derived encryption key
-   */
-  async #buildEncryptionKey(fromPassword) {
-    // Initialize encryption key from password
-    const encoder = new TextEncoder();
-    const passwordData = encoder.encode(fromPassword);
-
-    // Derive a key from the password
-    const keyMaterial = await crypto.subtle.importKey("raw", passwordData, "PBKDF2", false, ["deriveBits", "deriveKey"]);
-
-    // Use PBKDF2 to derive a key
-    return await crypto.subtle.deriveKey(
-      {
-        name: "PBKDF2",
-        salt: encoder.encode("wa-sqlite-encrypted-vfs"),
-        iterations: 100000,
-        hash: "SHA-256",
-      },
-      keyMaterial,
-      { name: "AES-GCM", length: 256 },
-      false,
-      ["encrypt", "decrypt"]
-    );
-  }
 
   /**
    * Encrypt data using AES-GCM with a random IV
@@ -248,13 +210,13 @@ class EncryptedPermutedOPFSWorker extends BaseWriteWorker {
     // Generate a random IV
     const iv = crypto.getRandomValues(new Uint8Array(12)); // 12 bytes is recommended for AES-GCM
 
-    // Encrypt the data
+    // Encrypt the data using key from base class
     const encryptedBuffer = await crypto.subtle.encrypt(
       {
         name: "AES-GCM",
         iv,
       },
-      this.#encryptionKey,
+      this.getEncryptionKey(),
       data
     );
     const encryptedData = new Uint8Array(encryptedBuffer);
@@ -273,13 +235,13 @@ class EncryptedPermutedOPFSWorker extends BaseWriteWorker {
    * @returns {Promise<Uint8Array>}
    */
   async #decryptData(encryptedData, iv) {
-    // Decrypt the data
+    // Decrypt the data using key from base class
     const decryptedBuffer = await crypto.subtle.decrypt(
       {
         name: "AES-GCM",
         iv,
       },
-      this.#encryptionKey,
+      this.getEncryptionKey(),
       encryptedData
     );
 
@@ -374,14 +336,13 @@ class EncryptedPermutedOPFSWorker extends BaseWriteWorker {
   /**
    * Initialize IndexedDB for page storage
    * @param {string} dbNameParam - Database name
-   * @param {boolean} isEncrypted - Whether encryption is enabled
    * @returns {Promise<boolean>}
    */
-  async #initIndexedDb(dbNameParam, isEncrypted) {
+  async #initIndexedDb(dbNameParam) {
     try {
       // Initialize IndexedDB for page storage
       this.#idb = await new Promise((resolve, reject) => {
-        const indexedDbName = `SyncMemoryProxyAsyncWorkerVFS-${dbNameParam}${isEncrypted ? "-enc" : ""}`;
+        const indexedDbName = `SyncMemoryProxyAsyncWorkerVFS-${dbNameParam}-enc`;
         const request = indexedDB.open(indexedDbName, 1);
         request.onupgradeneeded = (event) => {
           const db = request.result;
@@ -482,14 +443,13 @@ class EncryptedPermutedOPFSWorker extends BaseWriteWorker {
   /**
    * Initialize OPFS for file access
    * @param {string} dbNameParam - Database name
-   * @param {boolean} isEncrypted - Whether encryption is enabled
    * @returns {Promise<ArrayBuffer>} - The database file content
    */
-  async #initOpfs(dbNameParam, isEncrypted) {
+  async #initOpfs(dbNameParam) {
     try {
       // Get a handle to the file in OPFS (creating if necessary)
       this.#rootDir = await navigator.storage.getDirectory();
-      const filenameInOpfs = isEncrypted ? `${dbNameParam}.enc` : dbNameParam;
+      const filenameInOpfs = `${dbNameParam}.enc`;
       this.#dbFileHandle = await this.#rootDir.getFileHandle(filenameInOpfs, {
         create: true,
       });
@@ -511,8 +471,8 @@ class EncryptedPermutedOPFSWorker extends BaseWriteWorker {
     const file = await this.#dbFileHandle.getFile();
     let encryptedData = await file.arrayBuffer();
 
-    // Decrypt the file if encryption is enabled and we have data
-    if (encryptedData.byteLength > 0 && this.#encryptionKey) {
+    // Decrypt the file if we have data (encryption is always enabled)
+    if (encryptedData.byteLength > 0) {
       try {
         return await this.#decryptFile(encryptedData);
       } catch (e) {
@@ -524,7 +484,7 @@ class EncryptedPermutedOPFSWorker extends BaseWriteWorker {
         }
       }
     } else {
-      // No encryption or empty file, just store the data as-is
+      // Empty file, just return empty buffer
       return encryptedData;
     }
   }
@@ -561,38 +521,30 @@ class EncryptedPermutedOPFSWorker extends BaseWriteWorker {
       plainData.set(sourceData, 0);
     }
 
-    if (this.#encryptionKey) {
-      // Encrypt the page
-      const { encryptedData, iv } = await this.#encryptData(plainData);
+    // Encrypt the page (encryption is always enabled)
+    const { encryptedData, iv } = await this.#encryptData(plainData);
 
-      // Determine where to write the encrypted page
-      let encOffset;
-      const existingPage = this.#pages.get(pageIndex);
+    // Determine where to write the encrypted page
+    let encOffset;
+    const existingPage = this.#pages.get(pageIndex);
 
-      if (existingPage) {
-        // Reuse the existing location if we've written this page before
-        encOffset = existingPage.encData.offset;
-      } else {
-        // Append to the end of the file
-        encOffset = writeFileLength;
-        writeFileLength += encryptedData.byteLength;
-      }
-
-      // Write the encrypted page to OPFS
-      await writable.seek(encOffset);
-      await writable.write(encryptedData);
-
-      // Save the page metadata
-      await this.#savePageMeta(pageIndex, encOffset, encryptedData.byteLength, iv);
-
-      return writeFileLength;
+    if (existingPage) {
+      // Reuse the existing location if we've written this page before
+      encOffset = existingPage.encData.offset;
     } else {
-      // For unencrypted storage, write directly at the page-aligned offset
-      await writable.seek(pageStart);
-      await writable.write(plainData);
-
-      return Math.max(writeFileLength, pageStart + this.#opfsPageSize);
+      // Append to the end of the file
+      encOffset = writeFileLength;
+      writeFileLength += encryptedData.byteLength;
     }
+
+    // Write the encrypted page to OPFS
+    await writable.seek(encOffset);
+    await writable.write(encryptedData);
+
+    // Save the page metadata
+    await this.#savePageMeta(pageIndex, encOffset, encryptedData.byteLength, iv);
+
+    return writeFileLength;
   }
 
   /**
@@ -601,21 +553,16 @@ class EncryptedPermutedOPFSWorker extends BaseWriteWorker {
    * @param {FileSystemWritableFileStream} writable - The OPFS writable stream
    */
   async #processTruncateOperation(size, writable) {
-    if (this.#encryptionKey) {
-      // For encrypted storage, delete pages after truncation point
-      const truncatePageIndex = this.#getOpfsPageIndex(size);
-      const pagesToDelete = Array.from(this.#pages.keys()).filter((pageIdx) => pageIdx > truncatePageIndex);
+    // For encrypted storage, delete pages after truncation point
+    const truncatePageIndex = this.#getOpfsPageIndex(size);
+    const pagesToDelete = Array.from(this.#pages.keys()).filter((pageIdx) => pageIdx > truncatePageIndex);
 
-      for (const pageIdx of pagesToDelete) {
-        await this.#deletePageMeta(pageIdx);
-      }
-
-      // as the pages may be written to OPFS out-of-order, we cannot truncate the file
-      // space can be reclaimed by VACUUM
-    } else {
-      // For unencrypted storage, just truncate the file
-      await writable.truncate(size);
+    for (const pageIdx of pagesToDelete) {
+      await this.#deletePageMeta(pageIdx);
     }
+
+    // As the pages may be written to OPFS out-of-order, we cannot truncate the file
+    // Space can be reclaimed by VACUUM
   }
 
   /**
@@ -629,7 +576,7 @@ class EncryptedPermutedOPFSWorker extends BaseWriteWorker {
       this.#dbFileHandle = null;
 
       // Clear all page metadata
-      if (this.#encryptionKey) {
+      if (this.getEncryptionKey()) {
         await this.#clearPageMetas();
       }
 

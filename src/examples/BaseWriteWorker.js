@@ -17,16 +17,18 @@
 
 /**
  * @typedef {Object} VFSConfig
- * @property {string} [encryptionPassword]
- * @property {string} [dbName]
+ * @property {string} encryptionPassword - Required password for encryption
+ * @property {string} [dbName] - Optional database name
+ * @property {string} [pageSize] - Optional page size to write
  */
 
 export class BaseWriteWorker {
   // Order tracking for writes
   #lastProcessedCounter = -1;
   #pendingOperations = new Map();
-  #fileData = null;
+  /** @type {ArrayBuffer} */ #fileData = null;
   #initialized = false;
+  #encryptionKey = null;
   
   constructor() {
     // Set up the message handler
@@ -34,9 +36,23 @@ export class BaseWriteWorker {
   }
 
   /**
+   * Base initialization
+   * @param {VFSConfig} config - Configuration parameters for the worker
+   */
+  async _init(config) {
+    if (!config.encryptionPassword) {
+      throw new Error("Encryption password is required");
+    }
+    await this.buildEncryptionKey(config.encryptionPassword);
+    
+    // Initialize the worker
+    await this.init(config);
+    this.#initialized = true;
+  }
+
+  /**
    * Initialize worker with configuration
    * @param {VFSConfig} config - Configuration parameters for the worker
-   * @returns {Promise<ArrayBuffer>} Initial file data
    */
   async init(config) {
     // This method should be overridden by subclasses
@@ -66,6 +82,54 @@ export class BaseWriteWorker {
    */
   getFileData() {
     return this.#fileData;
+  }
+
+  /**
+   * Get encryption key - accessor for subclasses
+   * @returns {CryptoKey} Encryption key
+   */
+  getEncryptionKey() {
+    return this.#encryptionKey;
+  }
+
+  /**
+   * Initialize the encryption key from password
+   * @param {string} password - Password to derive key from
+   * @returns {Promise<CryptoKey>} - The derived encryption key
+   */
+  async buildEncryptionKey(password) {
+    if (!password) {
+      throw new Error("Encryption password is required");
+    }
+    
+    // Initialize encryption key from password
+    const encoder = new TextEncoder();
+    const passwordData = encoder.encode(password);
+
+    // Derive a key from the password
+    const keyMaterial = await crypto.subtle.importKey(
+      "raw", 
+      passwordData, 
+      "PBKDF2", 
+      false, 
+      ["deriveBits", "deriveKey"]
+    );
+
+    // Use PBKDF2 to derive a key
+    this.#encryptionKey = await crypto.subtle.deriveKey(
+      {
+        name: "PBKDF2",
+        salt: encoder.encode("wa-sqlite-encrypted-vfs"),
+        iterations: 100000,
+        hash: "SHA-256",
+      },
+      keyMaterial,
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["encrypt", "decrypt"]
+    );
+    
+    return this.#encryptionKey;
   }
 
   /**
@@ -120,19 +184,18 @@ export class BaseWriteWorker {
   async #handleMessage(e) {
     const msg = e.data;
     
-    console.log(`BaseWriteWorker | Received ${msg.type} message`);
-
     switch (msg.type) {
       case 'init':
         try {
-          // Initialize the worker
-          const initFileData = await this.init(msg.config);
-          this.#fileData = initFileData;
-          this.#initialized = true;
+          await this._init(msg.config);
+          
+          // Send initialization complete message, with a copy of the file data
+          const initDataCopy = new Uint8Array(new Uint8Array(this.#fileData));
           self.postMessage({
             type: 'initComplete',
-            fileData: initFileData
-          });
+            fileData: initDataCopy
+          }, [initDataCopy.buffer]);
+
         } catch (error) {
           console.error('BaseWriteWorker | Initialization failed:', error);
           self.postMessage({
@@ -237,8 +300,6 @@ export class BaseWriteWorker {
    * @param {Array<PendingOperation>} operations - Array of operations to process
    */
   #handleWrites(operations) {
-    console.log(`BaseWriteWorker | Received ${operations.length} write operations`);
-
     // Check if we have operations
     if (!operations || operations.length === 0) {
       return;
