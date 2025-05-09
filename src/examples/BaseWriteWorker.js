@@ -2,16 +2,16 @@
  * BaseWriteWorker.js
  * 
  * Base class for web workers that handle ordered write operations.
- * This handles message passing, operation ordering, and acknowledgments,
- * but delegates the actual persistence to subclasses.
+ * This handles message passing and operation ordering but delegates 
+ * the actual persistence to subclasses.
  */
 
 /**
  * @typedef {Object} PendingOperation
  * @property {'write'|'truncate'|'delete'} type
- * @property {number} counter
  * @property {number} [offset]
- * @property {Uint8Array} [data]
+ * @property {number} [bufferOffset]
+ * @property {number} [length]
  * @property {number} [size]
  */
 
@@ -24,8 +24,7 @@
 
 export class BaseWriteWorker {
   // Order tracking for writes
-  #lastProcessedCounter = -1;
-  #pendingOperations = new Map();
+  #pendingOperations = [];
   /** @type {ArrayBuffer} */ #fileData = null;
   #initialized = false;
   #encryptionKey = null;
@@ -212,7 +211,7 @@ export class BaseWriteWorker {
         break;
         
       case 'writes':
-        // Process writes in order
+        // Process writes in batch
         if (!this.#initialized) {
           self.postMessage({
             type: 'error',
@@ -220,7 +219,7 @@ export class BaseWriteWorker {
           });
           break;
         }
-        this.#handleWrites(msg.operations);
+        this.#handleWrites(msg.operations, msg.data);
         break;
         
       default:
@@ -229,127 +228,71 @@ export class BaseWriteWorker {
   }
 
   /**
-   * Queue an operation for processing in order
-   * @param {PendingOperation} operation - The operation to queue
-   * @returns {boolean} - Whether the operation was queued successfully
-   */
-  #queueOrderedOperation(operation) {
-    if (this.#lastProcessedCounter >= operation.counter) {
-      return false; // Already processed this counter or a higher one
-    }
-
-    // Store the operation in our ordered map
-    this.#pendingOperations.set(operation.counter, operation);
-    return true;
-  }
-
-  /**
-   * Process operations in order by counter
+   * Process operations in a batch
    * Limits the number of operations processed in a single iteration
    * to avoid excessive memory usage and improve responsiveness
-   * 
-   * This method is designed to be called both directly and via setTimeout,
-   * with concurrency controls to ensure it's never running in parallel.
    */
-  async #processOrderedOperations() {
+  async #processOperationsBatch() {
     // check (and get) the processing lock
     if (this.#processingOperations) {
       return;
     }
     this.#processingOperations = true;
     
-    try {      
-      let processedAny = false;
-      let processedCount = 0;
+    try {
+      // Process up to maxWritesPerIteration operations at once
+      const operationsToProcess = this.#pendingOperations.splice(0, this.#maxWritesPerIteration);
       
-      // Continue processing as long as we have sequential operations
-      // and we haven't exceeded the maximum number of operations per iteration
-      while (
-        this.#pendingOperations.has(this.#lastProcessedCounter + 1) && 
-        processedCount < this.#maxWritesPerIteration
-      ) {
-        processedAny = true;
-        const nextCounter = this.#lastProcessedCounter + 1;
-        const operation = this.#pendingOperations.get(nextCounter);
-      
-        // Process the operation based on its type
-        if (operation.type === 'write') {
-          await this.processWrite(operation.offset, operation.data);
-        } else if (operation.type === 'truncate') {
-          await this.processTruncate(operation.size);
-        } else if (operation.type === 'delete') {
-          await this.processDelete();
+      if (operationsToProcess.length > 0) {
+        // Process each operation in the batch
+        for (const operation of operationsToProcess) {
+          // Process the operation based on its type
+          if (operation.type === 'write') {
+            await this.processWrite(operation.offset, operation.data);
+          } else if (operation.type === 'truncate') {
+            await this.processTruncate(operation.size);
+          } else if (operation.type === 'delete') {
+            await this.processDelete();
+          }
         }
         
-        // Update the last processed counter
-        this.#lastProcessedCounter = nextCounter;
-        
-        // Remove the operation from pending
-        this.#pendingOperations.delete(nextCounter);
-        
-        // Increment the processed count
-        processedCount++;
-      }
-      
-      // Send acknowledgments for all processed operations if we processed any
-      if (processedAny) {
-        self.postMessage({
-          type: 'writeAck',
-          upToCounter: this.#lastProcessedCounter
-        });
-
         // Trigger the write queue processing in the subclass
         await this.processWriteQueue();
       }
       
-      // Log if there are gaps in the counter sequence
-      if (this.#pendingOperations.size > 0) {
-        const nextExpected = this.#lastProcessedCounter + 1;
-        if (!this.#pendingOperations.has(nextExpected)) {
-          const pendingKeys = Array.from(this.#pendingOperations.keys()).sort((a, b) => a - b);
-          console.log(`BaseWriteWorker | Waiting for operation with counter ${nextExpected}. Pending operations: ${pendingKeys.join(', ')}`);
-        }
+      // If there are more operations, schedule another processing batch
+      if (this.#pendingOperations.length > 0) {
+        setTimeout(() => this.#processOperationsBatch(), 0);
       }
     } finally {
       this.#processingOperations = false;
-      
-      // If the next operations are ready, process them immediately
-      if (this.#pendingOperations.has(this.#lastProcessedCounter + 1)) {
-        setTimeout(() => this.#processOrderedOperations(), 0);
-      }
     }
   }
 
   /**
    * Handle a batch of write operations
    * @param {Array<PendingOperation>} operations - Array of operations to process
+   * @param {Uint8Array} sharedBuffer - Buffer containing all write data
    */
-  #handleWrites(operations) {
+  #handleWrites(operations, sharedBuffer) {
     // Check if we have operations
     if (!operations || operations.length === 0) {
       return;
     }
     
-    // Queue each operation for ordered processing
-    let countersToAck = [];
+    // Process each operation
     for (const operation of operations) {
-      // Queue the operation
-      const queued = this.#queueOrderedOperation(operation);
-      if (queued) {
-        countersToAck.push(operation.counter);
+      // For write operations, extract the data from the shared buffer
+      if (operation.type === 'write' && operation.bufferOffset !== undefined && operation.length !== undefined) {
+        // Create a view of the data in the shared buffer
+        operation.data = new Uint8Array(sharedBuffer.buffer, operation.bufferOffset, operation.length);
       }
+      
+      // Add to the pending operations array
+      this.#pendingOperations.push(operation);
     }
     
-    // Send acknowledgment immediately for all successfully queued operations
-    // Note: We don't wait for processing to complete before acknowledging receipt
-    if (countersToAck.length > 0) {
-      self.postMessage({
-        type: 'writeAck',
-        counters: countersToAck
-      });
-    }
-
-    // Start processing the operations in order
-    this.#processOrderedOperations();
+    // Start processing the operations
+    this.#processOperationsBatch();
   }
 }

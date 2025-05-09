@@ -20,7 +20,8 @@ import * as VFS from "../VFS.js";
  * @typedef {Object} PendingWriteOperation
  * @property {'write' | 'truncate' | 'delete'} type
  * @property {number} [offset]
- * @property {Uint8Array} [data]
+ * @property {number} [bufferOffset]
+ * @property {number} [length]
  * @property {number} [size]
  */
 
@@ -44,13 +45,16 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
   // Buffer for initial data loaded by the worker
   /** @type {ArrayBuffer} */ #initialData = null;
 
-  // Counter for ordering write operations
-  #writeCounter = 0;
+  // Buffer for the data writes
+  /** @type {Uint8Array} */ #writeBuffer = new Uint8Array(1024 * 1024); // 1MB initial buffer
+
+  // Current offset in the write buffer
+  #writeBufferOffset = 0;
 
   #writePushCadenceMsec = 25;
 
-  // Map of pending operations that haven't been acknowledged
-  /** @type {Map<number, PendingWriteOperation>} */ #pendingWrites = new Map();
+  // Array of pending operations
+  /** @type {Array<PendingWriteOperation>} */ #pendingWrites = [];
 
   // Interval ID for the periodic write sender
   #writeIntervalId = null;
@@ -150,23 +154,7 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
    * @param {MessageEvent} event - The message event
    */
   #handleWorkerMessage(event) {
-    const msg = event.data;
-    
-    if (msg.type === 'writeAck') {
-      // Handle acknowledgment for multiple counters
-      if (Array.isArray(msg.counters)) {
-        for (const counter of msg.counters) {
-          this.#pendingWrites.delete(counter);
-        }
-      } else if (msg.upToCounter !== undefined) {
-        // delete all pending writes up to the acknowledged counter
-        for (const [counter] of this.#pendingWrites.entries()) {
-          if (counter <= msg.upToCounter) {
-            this.#pendingWrites.delete(counter);
-          }
-        }
-      }
-    }
+    // We no longer need to handle ack messages as we don't retry
   }
 
   /**
@@ -188,35 +176,45 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
    * Send any pending operations to the worker
    */
   #sendPendingWrites() {
-    if (this.#pendingWrites.size === 0) {
+    if (this.#pendingWrites.length === 0) {
       return;
     }
 
-    // Prepare a batch of operations to send in a single message
-    const operations = [];
-    const transferBuffers = [];
+    // Atomically claim the operations to send
+    const operations = this.#pendingWrites.splice(0);
     
-    for (const [counter, operation] of this.#pendingWrites.entries()) {
-      const msgOp = {
-        ...operation,
-        counter,
-      };
-      if (operation.data) {
-        // When we transfer a buffer to a worker, it is wiped out here
-        // so we make a copy, just in case we need to retry this message later
-        const dataCopy = new Uint8Array(operation.data.length);
-        dataCopy.set(operation.data);
-        msgOp.data = dataCopy;
-        transferBuffers.push(dataCopy.buffer);
-      }
-      operations.push(msgOp);
-    }
+    // Atomically claim the current write buffer and create a new one
+    const currentWriteBuffer = this.#writeBuffer.slice(0, this.#writeBufferOffset);
+    this.#writeBuffer = new Uint8Array(Math.max(1024 * 1024, this.#writeBufferOffset));
+    this.#writeBufferOffset = 0;
     
     // Send a single batch message with all pending operations
     this.#worker.postMessage({
       type: 'writes',
       operations,
-    }, transferBuffers);
+      data: currentWriteBuffer
+    }, [currentWriteBuffer.buffer]);
+  }
+
+  /**
+   * Ensure the write buffer is large enough to store the new data
+   * @param {number} additionalBytes - How many more bytes we need to store
+   */
+  #ensureWriteBufferCapacity(additionalBytes) {
+    const requiredSize = this.#writeBufferOffset + additionalBytes;
+    
+    if (requiredSize > this.#writeBuffer.length) {
+      // Create a new, larger buffer
+      const newSize = Math.max(this.#writeBuffer.length * 2, requiredSize);
+      console.log("SyncMemoryProxyAsyncWorkerVFS | Resizing write buffer to", newSize);
+      const newBuffer = new Uint8Array(newSize);
+      
+      // Copy data from the old buffer to the new one
+      newBuffer.set(this.#writeBuffer.subarray(0, this.#writeBufferOffset));
+      
+      // Replace the old buffer
+      this.#writeBuffer = newBuffer;
+    }
   }
 
   /**
@@ -225,18 +223,20 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
    * @param {Uint8Array} data - The data to write
    */
   #queueWrite(offset, data) {
-    // Create a copy of the data to avoid issues with buffer reuse
-    const dataCopy = new Uint8Array(data.length);
-    dataCopy.set(data);
+    // Ensure we have enough space in the write buffer
+    this.#ensureWriteBufferCapacity(data.length);
     
-    // Increment counter for this write
-    const writeCounter = this.#writeCounter++;
+    // Store the data in our shared write buffer
+    const bufferOffset = this.#writeBufferOffset;
+    this.#writeBuffer.set(data, bufferOffset);
+    this.#writeBufferOffset += data.length;
     
-    // Store in pending operations
-    this.#pendingWrites.set(writeCounter, {
+    // Add to pending operations array
+    this.#pendingWrites.push({
       type: 'write',
       offset,
-      data: dataCopy
+      bufferOffset,
+      length: data.length
     });
   }
 
@@ -245,10 +245,8 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
    * @param {number} size - The new size to truncate to
    */
   #queueTruncate(size) {
-    const writeCounter = this.#writeCounter++;
-    
-    // Store in pending operations
-    this.#pendingWrites.set(writeCounter, {
+    // Add to pending operations array
+    this.#pendingWrites.push({
       type: 'truncate',
       size
     });
@@ -258,10 +256,8 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
    * Queue a delete operation
    */
   #queueDelete() {
-    const writeCounter = this.#writeCounter++;
-    
-    // Store in pending operations
-    this.#pendingWrites.set(writeCounter, {
+    // Add to pending operations array
+    this.#pendingWrites.push({
       type: 'delete'
     });
   }
