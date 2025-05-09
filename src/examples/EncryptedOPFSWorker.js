@@ -27,9 +27,6 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
   #AUTH_TAG_SIZE = 16; // GCM authentication tag size
   #opfsPageSize = this.#sourcePageSize + this.#IV_SIZE + this.#AUTH_TAG_SIZE;
   
-  // Write queue constants
-  #maxWriteChunks = 500; // Maximum number of operations to process in one batch
-  
   // Write queue for OPFS operations
   #writeQueue = [];
   #activeWrites = []; // Operations currently being processed
@@ -119,13 +116,10 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
   }
 
   /**
-   * Process the write queue to persist changes to OPFS
-   * Required implementation from BaseWriteWorker
-   * This implementation is designed to be resilient against file corruption
-   * and worker termination by:
-   * 1. Keeping track of active writes until they are fully committed
-   * 2. Processing writes in limited-size batches
-   * 3. Handling unexpected errors gracefully
+   * Process the entire write queue to persist changes to OPFS.
+   * To ensure our file is in a consistent state, we should process the entire queue,
+   * or none of it.  The BaseWriteWorker restricts how many changes are in the queue,
+   * so it shouldn't get too large.
    */
   async processWriteQueue() {
     // If nothing to process, exit early
@@ -142,19 +136,14 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
         keepExistingData: true,
       });
 
-      // If we have pending active writes from a previous interrupted operation,
-      // process those first before taking new operations from the queue
-      if (this.#activeWrites.length === 0) {
-        // Take a limited batch of operations from the queue
-        this.#activeWrites = this.#writeQueue.splice(0, this.#maxWriteChunks);
-        console.log(`EncryptedOPFSWorker | Processing ${this.#activeWrites.length} write operations (${this.#writeQueue.length} remaining in queue)`);
-      } else {
-        console.log(`EncryptedOPFSWorker | Resuming processing of ${this.#activeWrites.length} previously active write operations`);
-      }
+      // If we have pending active writes from a previous interrupted operation, process them first
+      const priorWriteCount = this.#activeWrites.length;
+      const newWrites = this.#writeQueue.splice(0);
+      this.#activeWrites = this.#activeWrites.concat(newWrites);
+      console.log(`EncryptedOPFSWorker | Processing ${(priorWriteCount + newWrites.length)} write operations${(priorWriteCount > 0) ? ` (${priorWriteCount} from prior failed attempt)` : ""}`);
 
       // Track dirty pages that need to be written
-      /** @type {Set<number>} */ 
-      let dirtyPages = new Set();
+      /** @type {Set<number>} */ let dirtyPages = new Set();
 
       // Process all operations in order
       for (const operation of this.#activeWrites) {       

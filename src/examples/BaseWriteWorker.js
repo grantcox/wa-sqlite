@@ -30,6 +30,12 @@ export class BaseWriteWorker {
   #initialized = false;
   #encryptionKey = null;
   
+  // Maximum number of write operations to process in a single iteration
+  #maxWritesPerIteration = 1000;
+  
+  // Concurrency control
+  #processingOperations = false;
+  
   constructor() {
     // Set up the message handler
     self.onmessage = this.#handleMessage.bind(this);
@@ -239,17 +245,33 @@ export class BaseWriteWorker {
 
   /**
    * Process operations in order by counter
+   * Limits the number of operations processed in a single iteration
+   * to avoid excessive memory usage and improve responsiveness
+   * 
+   * This method is designed to be called both directly and via setTimeout,
+   * with concurrency controls to ensure it's never running in parallel.
    */
   async #processOrderedOperations() {
-    let processedAny = false;
+    // check (and get) the processing lock
+    if (this.#processingOperations) {
+      return;
+    }
+    this.#processingOperations = true;
     
-    // Continue processing as long as we have sequential operations
-    while (this.#pendingOperations.has(this.#lastProcessedCounter + 1)) {
-      processedAny = true;
-      const nextCounter = this.#lastProcessedCounter + 1;
-      const operation = this.#pendingOperations.get(nextCounter);
+    try {      
+      let processedAny = false;
+      let processedCount = 0;
       
-      try {
+      // Continue processing as long as we have sequential operations
+      // and we haven't exceeded the maximum number of operations per iteration
+      while (
+        this.#pendingOperations.has(this.#lastProcessedCounter + 1) && 
+        processedCount < this.#maxWritesPerIteration
+      ) {
+        processedAny = true;
+        const nextCounter = this.#lastProcessedCounter + 1;
+        const operation = this.#pendingOperations.get(nextCounter);
+      
         // Process the operation based on its type
         if (operation.type === 'write') {
           await this.processWrite(operation.offset, operation.data);
@@ -264,33 +286,36 @@ export class BaseWriteWorker {
         
         // Remove the operation from pending
         this.#pendingOperations.delete(nextCounter);
-      } catch (error) {
-        console.error(`BaseWriteWorker | Error processing operation ${nextCounter}:`, error);
-        break;
+        
+        // Increment the processed count
+        processedCount++;
       }
-    }
-    
-    // Send acknowledgments for all processed operations if we processed any
-    if (processedAny) {
-      self.postMessage({
-        type: 'writeAck',
-        upToCounter: this.#lastProcessedCounter
-      });
+      
+      // Send acknowledgments for all processed operations if we processed any
+      if (processedAny) {
+        self.postMessage({
+          type: 'writeAck',
+          upToCounter: this.#lastProcessedCounter
+        });
 
-      // Trigger the write queue processing in the subclass
-      try {
+        // Trigger the write queue processing in the subclass
         await this.processWriteQueue();
-      } catch (error) {
-        console.error('BaseWriteWorker | Error processing write queue:', error);
       }
-    }
-    
-    // Log if there are gaps in the counter sequence
-    if (this.#pendingOperations.size > 0) {
-      const nextExpected = this.#lastProcessedCounter + 1;
-      if (!this.#pendingOperations.has(nextExpected)) {
-        const pendingKeys = Array.from(this.#pendingOperations.keys()).sort((a, b) => a - b);
-        console.log(`BaseWriteWorker | Waiting for operation with counter ${nextExpected}. Pending operations: ${pendingKeys.join(', ')}`);
+      
+      // Log if there are gaps in the counter sequence
+      if (this.#pendingOperations.size > 0) {
+        const nextExpected = this.#lastProcessedCounter + 1;
+        if (!this.#pendingOperations.has(nextExpected)) {
+          const pendingKeys = Array.from(this.#pendingOperations.keys()).sort((a, b) => a - b);
+          console.log(`BaseWriteWorker | Waiting for operation with counter ${nextExpected}. Pending operations: ${pendingKeys.join(', ')}`);
+        }
+      }
+    } finally {
+      this.#processingOperations = false;
+      
+      // If the next operations are ready, process them immediately
+      if (this.#pendingOperations.has(this.#lastProcessedCounter + 1)) {
+        setTimeout(() => this.#processOrderedOperations(), 0);
       }
     }
   }
