@@ -3,7 +3,7 @@
  * 
  * Web Worker implementation for handling persistence operations for SyncMemoryProxyAsyncWorkerVFS.
  * This worker handles OPFS operations with mandatory encryption, storing all data
- * directly in the OPFS file at predictable offsets.
+ * directly in the OPFS file at predictable offsets using a synchronous access handle.
  */
 
 import { BaseWriteWorker } from './BaseWriteWorker.js';
@@ -16,7 +16,9 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
   // OPFS state
   #rootDir = null;
   #fileName = null;
-  #dbFileHandle = null;
+  
+  // Synchronous access handle for OPFS file
+  #accessHandle = null;
   
   // Configuration
   #dbName = "db.sqlite";
@@ -30,6 +32,7 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
   // Write queue for OPFS operations
   #writeQueue = [];
   #activeWrites = []; // Operations currently being processed
+  totalWriteTime = 0;
   
   /**
    * Initialize the worker with configuration
@@ -112,7 +115,7 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
   /**
    * Process the entire write queue to persist changes to OPFS.
    * To ensure our file is in a consistent state, we should process the entire queue,
-   * or none of it.  The BaseWriteWorker restricts how many changes are in the queue,
+   * or none of it. The BaseWriteWorker restricts how many changes are in the queue,
    * so it shouldn't get too large.
    */
   async processWriteQueue() {
@@ -125,10 +128,10 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
     let writtenPageCount = 0;
 
     try {
-      // Create a writable stream to the OPFS file
-      const writable = await this.#dbFileHandle.createWritable({
-        keepExistingData: true,
-      });
+      // Ensure we have an access handle before processing
+      if (!this.#accessHandle) {
+        throw new Error("No access handle available for OPFS file");
+      }
 
       // If we have pending active writes from a previous interrupted operation, process them first
       const priorWriteCount = this.#activeWrites.length;
@@ -155,13 +158,12 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
             }
           });
 
-          await this.#processTruncateOperation(size, writable);
+          await this.#processTruncateOperation(size);
         } else if (operation.type === "delete") {
           dirtyPages.clear();
           
-          await this.#processDeleteOperation(writable);
-          // Need to create a new writable after delete
-          writable = null;
+          await this.#processDeleteOperation();
+          // Need to recreate access handle after delete
           // Operations after a delete would be for a new file, so we'll break the loop after this
           break;
         }
@@ -170,22 +172,25 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
       // Write all dirty pages
       if (dirtyPages.size > 0) {
         for (const pageIndex of dirtyPages) {
-          await this.#processPage(pageIndex, writable);
+          await this.#processPage(pageIndex);
           writtenPageCount++;
         }
       }
 
       // All operations processed successfully
       this.#activeWrites = [];
-      await writable.close();
+      
+      // Sync changes to disk
+      this.#accessHandle.flush();
 
     } catch (e) {
       console.error(`EncryptedOPFSWorker | Failed to process operation queue: ${e.message}`);
       // Note: We don't clear activeWrites here so they can be retried on next call
     } finally {
-      // we intentionally do not close the writable here - if an error occurred we don't want to commit the partial state
       const end = performance.now();
-      console.log(`EncryptedOPFSWorker | Wrote ${writtenPageCount} pages in ${(end - start).toFixed(2)} ms`);
+      const duration = end - start;
+      this.totalWriteTime += duration;
+      console.log(`EncryptedOPFSWorker | Wrote ${writtenPageCount} pages in ${(end - start).toFixed(1)} ms (${this.totalWriteTime.toFixed(1)} ms total)`);
 
       // If there are more operations in the queue, continue processing
       if (this.#writeQueue.length > 0 || this.#activeWrites.length > 0) {
@@ -259,9 +264,14 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
     try {
       // Get a handle to the file in OPFS (creating if necessary)
       this.#rootDir = await navigator.storage.getDirectory();
-      this.#dbFileHandle = await this.#rootDir.getFileHandle(this.#fileName, {
+      
+      // Get file handle
+      const fileHandle = await this.#rootDir.getFileHandle(this.#fileName, {
         create: true,
       });
+      
+      // Create a synchronous access handle for the file
+      this.#accessHandle = await fileHandle.createSyncAccessHandle();
 
       // Load existing data from OPFS
       return await this.#readFileFromOPFS();
@@ -277,9 +287,12 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
    */
   async #readFileFromOPFS() {
     try {
-      // Load existing data from OPFS
-      const file = await this.#dbFileHandle.getFile();
-      const fileSize = file.size;
+      if (!this.#accessHandle) {
+        return new ArrayBuffer(0);
+      }
+      
+      // Get file size using the access handle
+      const fileSize = this.#accessHandle.getSize();
       
       // If the file is empty, return empty buffer
       if (fileSize === 0) {
@@ -288,8 +301,17 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
       }
       
       // Read file data and decrypt it
-      const fileData = await file.arrayBuffer();
-      return await this.#decryptFile(fileData);
+      const buffer = new ArrayBuffer(fileSize);
+      const dataView = new Uint8Array(buffer);
+      
+      // Use the sync read method to read the entire file
+      const bytesRead = this.#accessHandle.read(dataView, { at: 0 });
+      
+      if (bytesRead !== fileSize) {
+        console.warn(`EncryptedOPFSWorker | Read only ${bytesRead} bytes from file of size ${fileSize}`);
+      }
+      
+      return await this.#decryptFile(buffer);
     } catch (e) {
       console.error("EncryptedOPFSWorker | Error reading file from OPFS:", e);
       if (e instanceof DOMException && e.name === "OperationError") {
@@ -397,9 +419,8 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
   /**
    * Process a single page
    * @param {number} pageIndex - The page index
-   * @param {FileSystemWritableFileStream} writable - The OPFS writable stream
    */
-  async #processPage(pageIndex, writable) {
+  async #processPage(pageIndex) {
     const fileData = this.getFileData();
     if (!fileData) {
       console.error(`EncryptedOPFSWorker | Cannot process page ${pageIndex} without file data`);
@@ -435,46 +456,50 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
     combinedData.set(iv, 0);
     combinedData.set(encryptedData, this.#IV_SIZE);
 
-    // Seek to the page location and write the data
-    await writable.seek(pageOffset);
-    await writable.write(combinedData);
+    // Write the data to the file using the sync access handle
+    const bytesWritten = this.#accessHandle.write(combinedData, { at: pageOffset });
+    
+    if (bytesWritten !== combinedData.byteLength) {
+      throw new Error(`Failed to write entire page. Wrote ${bytesWritten} of ${combinedData.byteLength} bytes`);
+    }
   }
 
   /**
    * Process a truncate operation
    * @param {number} size - The new size of the unencrypted SQLite file, in bytes
-   * @param {FileSystemWritableFileStream} writable - The OPFS writable stream
    */
-  async #processTruncateOperation(size, writable) {
+  async #processTruncateOperation(size) {
     // Calculate the page index for the truncation point
     const truncatePageIndex = this.#getPageIndex(size);
     
     // Calculate the file size after truncation (including the partial last page)
     const finalSize = (truncatePageIndex + 1) * this.#opfsPageSize;
     
-    // Truncate the file
-    await writable.truncate(finalSize);
+    // Truncate the file using the sync access handle
+    this.#accessHandle.truncate(finalSize);
     
     console.log(`EncryptedOPFSWorker | Truncated file to ${finalSize} bytes (${truncatePageIndex + 1} pages)`);
   }
 
   /**
    * Process a delete operation
-   * @param {FileSystemWritableFileStream} writable - The OPFS writable stream
    */
-  async #processDeleteOperation(writable) {
+  async #processDeleteOperation() {
     try {
-      // Close the writable first
-      await writable.close();
+      // Close the current access handle
+      this.#accessHandle.close();
+      this.#accessHandle = null;
       
       // Delete the file from OPFS
       await this.#rootDir.removeEntry(this.#fileName);
-      this.#dbFileHandle = null;
       
       // Recreate an empty database file
-      this.#dbFileHandle = await this.#rootDir.getFileHandle(this.#fileName, {
+      const fileHandle = await this.#rootDir.getFileHandle(this.#fileName, {
         create: true,
       });
+      
+      // Create a new synchronous access handle for the file
+      this.#accessHandle = await fileHandle.createSyncAccessHandle();
 
       console.log(`EncryptedOPFSWorker | Deleted OPFS file`);
     } catch (e) {
