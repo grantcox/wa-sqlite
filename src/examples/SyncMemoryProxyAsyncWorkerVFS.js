@@ -20,8 +20,6 @@ import * as VFS from "../VFS.js";
  * @typedef {Object} PendingWriteOperation
  * @property {'write' | 'truncate' | 'delete'} type
  * @property {number} [offset]
- * @property {number} [bufferOffset]
- * @property {number} [length]
  * @property {number} [size]
  */
 
@@ -45,15 +43,9 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
   // Buffer for initial data loaded by the worker
   /** @type {ArrayBuffer} */ #initialData = null;
 
-  // Buffer for the data writes
-  /** @type {Uint8Array} */ #writeBuffer = new Uint8Array(1024 * 1024); // 1MB initial buffer
-
-  // Current offset in the write buffer
-  #writeBufferOffset = 0;
-
   #writePushCadenceMsec = 25;
 
-  // Array of pending operations
+  // Array of pending operations to track what has changed
   /** @type {Array<PendingWriteOperation>} */ #pendingWrites = [];
 
   // Interval ID for the periodic write sender
@@ -154,7 +146,7 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
    * @param {MessageEvent} event - The message event
    */
   #handleWorkerMessage(event) {
-    // We no longer need to handle ack messages as we don't retry
+    // No message handling needed in this implementation
   }
 
   /**
@@ -183,60 +175,35 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
     // Atomically claim the operations to send
     const operations = this.#pendingWrites.splice(0);
     
-    // Atomically claim the current write buffer and create a new one
-    const currentWriteBuffer = this.#writeBuffer.slice(0, this.#writeBufferOffset);
-    this.#writeBuffer = new Uint8Array(Math.max(1024 * 1024, this.#writeBufferOffset));
-    this.#writeBufferOffset = 0;
+    // Get the current state of the database file
+    const file = this.mapNameToFile.get(`/${this.#dbName}`);
+    if (!file || !file.data) {
+      return;
+    }
     
-    // Send a single batch message with all pending operations
+    // Create a copy of the database to send to the worker
+    const dbCopy = new Uint8Array(file.data.byteLength);
+    dbCopy.set(new Uint8Array(file.data, 0, file.size));
+    
+    // Send the entire database along with the operations log
     this.#worker.postMessage({
       type: 'writes',
       operations,
-      data: currentWriteBuffer
-    }, [currentWriteBuffer.buffer]);
-  }
-
-  /**
-   * Ensure the write buffer is large enough to store the new data
-   * @param {number} additionalBytes - How many more bytes we need to store
-   */
-  #ensureWriteBufferCapacity(additionalBytes) {
-    const requiredSize = this.#writeBufferOffset + additionalBytes;
-    
-    if (requiredSize > this.#writeBuffer.length) {
-      // Create a new, larger buffer
-      const newSize = Math.max(this.#writeBuffer.length * 2, requiredSize);
-      console.log("SyncMemoryProxyAsyncWorkerVFS | Resizing write buffer to", newSize);
-      const newBuffer = new Uint8Array(newSize);
-      
-      // Copy data from the old buffer to the new one
-      newBuffer.set(this.#writeBuffer.subarray(0, this.#writeBufferOffset));
-      
-      // Replace the old buffer
-      this.#writeBuffer = newBuffer;
-    }
+      databaseState: dbCopy
+    }, [dbCopy.buffer]);
   }
 
   /**
    * Queue a write operation to be sent to the worker
-   * @param {number} offset - The offset at which to write
-   * @param {Uint8Array} data - The data to write
+   * @param {number} offset - The offset at which the write occurred
+   * @param {Uint8Array} data - The data that was written (only used for length)
    */
   #queueWrite(offset, data) {
-    // Ensure we have enough space in the write buffer
-    this.#ensureWriteBufferCapacity(data.length);
-    
-    // Store the data in our shared write buffer
-    const bufferOffset = this.#writeBufferOffset;
-    this.#writeBuffer.set(data, bufferOffset);
-    this.#writeBufferOffset += data.length;
-    
-    // Add to pending operations array
+    // Only record the offset and size, no data copying
     this.#pendingWrites.push({
       type: 'write',
       offset,
-      bufferOffset,
-      length: data.length
+      size: data.byteLength
     });
   }
 

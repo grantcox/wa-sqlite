@@ -68,15 +68,12 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
 
   /**
    * Process a write operation, overriding base class
-   * @param {number} offset Byte offset to write
-   * @param {Uint8Array} data Data to write
+   * @param {number} offset Start byte offset that was written
+   * @param {number} size Length of write
    */
-  async processWrite(offset, data) {
-    // Call the base implementation to update in-memory data
-    await super.processWrite(offset, data);
-    
+  async processWrite(offset, size) {
     // Queue page writes for OPFS
-    const { startPageIndex, endPageIndex } = this.#getAffectedPageRange(offset, data.byteLength);
+    const { startPageIndex, endPageIndex } = this.#getAffectedPageRange(offset, size);
     
     // Queue these pages for writing to OPFS
     for (let pageIndex = startPageIndex; pageIndex <= endPageIndex; pageIndex++) {
@@ -92,9 +89,6 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
    * @param {number} size New file size
    */
   async processTruncate(size) {
-    // Call the base implementation to update in-memory data
-    await super.processTruncate(size);
-    
     // Queue the truncate operation
     this.#writeQueue.push({
       type: "truncate",

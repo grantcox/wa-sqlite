@@ -1,17 +1,14 @@
 /**
  * BaseWriteWorker.js
  * 
- * Base class for web workers that handle ordered write operations.
- * This handles message passing and operation ordering but delegates 
- * the actual persistence to subclasses.
+ * Base class for web workers that handle write operations.
+ * This handles message passing and delegates the actual persistence to subclasses.
  */
 
 /**
  * @typedef {Object} PendingOperation
  * @property {'write'|'truncate'|'delete'} type
  * @property {number} [offset]
- * @property {number} [bufferOffset]
- * @property {number} [length]
  * @property {number} [size]
  */
 
@@ -23,14 +20,9 @@
  */
 
 export class BaseWriteWorker {
-  // Order tracking for writes
-  #pendingOperations = [];
   /** @type {ArrayBuffer} */ #fileData = null;
   #initialized = false;
   #encryptionKey = null;
-  
-  // Maximum number of write operations to process in a single iteration
-  #maxWritesPerIteration = 1000;
   
   // Concurrency control
   #processingOperations = false;
@@ -139,25 +131,11 @@ export class BaseWriteWorker {
 
   /**
    * Process a write operation
-   * @param {number} offset Where to write
-   * @param {Uint8Array} data Data to write
+   * @param {number} offset Data that was changed
+   * @param {number} size Number of bytes
    */
-  async processWrite(offset, data) {
-    // Default implementation updates in-memory representation only
-    if (!this.#fileData) {
-      this.#fileData = new ArrayBuffer(0);
-    }
-    
-    // Make sure our in-memory representation is large enough
-    if (offset + data.byteLength > this.#fileData.byteLength) {
-      const newSize = Math.max(offset + data.byteLength, 2 * this.#fileData.byteLength);
-      const newFileData = new ArrayBuffer(newSize);
-      new Uint8Array(newFileData).set(new Uint8Array(this.#fileData));
-      this.#fileData = newFileData;
-    }
-    
-    // Copy the data at the specified offset
-    new Uint8Array(this.#fileData, offset, data.byteLength).set(data);
+  async processWrite(offset, size) {
+    // just exists as a hook for subclasses
   }
 
   /**
@@ -165,20 +143,13 @@ export class BaseWriteWorker {
    * @param {number} size New file size
    */
   async processTruncate(size) {
-    // Default implementation updates in-memory representation only
-    if (this.#fileData && size < this.#fileData.byteLength) {
-      // Create a smaller buffer with the truncated size
-      const newFileData = new ArrayBuffer(size);
-      new Uint8Array(newFileData).set(new Uint8Array(this.#fileData, 0, size));
-      this.#fileData = newFileData;
-    }
+    // just exists as a hook for subclasses
   }
 
   /**
    * Process a delete operation
    */
   async processDelete() {
-    // Default implementation clears in-memory representation
     this.#fileData = new ArrayBuffer(0);
   }
 
@@ -211,7 +182,7 @@ export class BaseWriteWorker {
         break;
         
       case 'writes':
-        // Process writes in batch
+        // Process database state and operations
         if (!this.#initialized) {
           self.postMessage({
             type: 'error',
@@ -219,7 +190,7 @@ export class BaseWriteWorker {
           });
           break;
         }
-        this.#handleWrites(msg.operations, msg.data);
+        this.#handleWrites(msg.operations, msg.databaseState);
         break;
         
       default:
@@ -228,11 +199,10 @@ export class BaseWriteWorker {
   }
 
   /**
-   * Process operations in a batch
-   * Limits the number of operations processed in a single iteration
-   * to avoid excessive memory usage and improve responsiveness
+   * Process operations in a batch (protected by concurrency lock)
+   * @param {Array<PendingOperation>} operations - Array of operations to process
    */
-  async #processOperationsBatch() {
+  async #processOperations(operations) {
     // check (and get) the processing lock
     if (this.#processingOperations) {
       return;
@@ -240,59 +210,40 @@ export class BaseWriteWorker {
     this.#processingOperations = true;
     
     try {
-      // Process up to maxWritesPerIteration operations at once
-      const operationsToProcess = this.#pendingOperations.splice(0, this.#maxWritesPerIteration);
-      
-      if (operationsToProcess.length > 0) {
-        // Process each operation in the batch
-        for (const operation of operationsToProcess) {
-          // Process the operation based on its type
-          if (operation.type === 'write') {
-            await this.processWrite(operation.offset, operation.data);
-          } else if (operation.type === 'truncate') {
-            await this.processTruncate(operation.size);
-          } else if (operation.type === 'delete') {
-            await this.processDelete();
-          }
+      // Process each operation (even though we're replacing the entire file data,
+      // subclasses may need these to be called to track dirty pages or other state)
+      for (const operation of operations) {
+        if (operation.type === 'write') {
+          await this.processWrite(operation.offset, operation.size);
+        } else if (operation.type === 'truncate') {
+          await this.processTruncate(operation.size);
+        } else if (operation.type === 'delete') {
+          await this.processDelete();
         }
-        
-        // Trigger the write queue processing in the subclass
-        await this.processWriteQueue();
       }
       
-      // If there are more operations, schedule another processing batch
-      if (this.#pendingOperations.length > 0) {
-        setTimeout(() => this.#processOperationsBatch(), 0);
-      }
+      // Call processWriteQueue to allow subclasses to persist changes
+      await this.processWriteQueue();
     } finally {
       this.#processingOperations = false;
     }
   }
 
   /**
-   * Handle a batch of write operations
-   * @param {Array<PendingOperation>} operations - Array of operations to process
-   * @param {Uint8Array} sharedBuffer - Buffer containing all write data
+   * Handle a batch of write operations and a new database state
+   * @param {Array<PendingOperation>} operations - Array of operations that were performed
+   * @param {Uint8Array} databaseState - The new complete database state
    */
-  #handleWrites(operations, sharedBuffer) {
-    // Check if we have operations
-    if (!operations || operations.length === 0) {
-      return;
-    }
+  #handleWrites(operations, databaseState) {
+    // Replace the entire file data with the new state
+    this.#fileData = databaseState.buffer;
     
-    // Process each operation
-    for (const operation of operations) {
-      // For write operations, extract the data from the shared buffer
-      if (operation.type === 'write' && operation.bufferOffset !== undefined && operation.length !== undefined) {
-        // Create a view of the data in the shared buffer
-        operation.data = new Uint8Array(sharedBuffer.buffer, operation.bufferOffset, operation.length);
-      }
-      
-      // Add to the pending operations array
-      this.#pendingOperations.push(operation);
+    // Process the operations to allow subclasses to track changes
+    if (operations.length > 0) {
+      this.#processOperations(operations);
+    } else {
+      // If no specific operations, still call processWriteQueue
+      this.processWriteQueue();
     }
-    
-    // Start processing the operations
-    this.#processOperationsBatch();
   }
 }
