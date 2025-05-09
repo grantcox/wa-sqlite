@@ -50,19 +50,17 @@
     </style>
   </head>
   <body>
-    <h1>Synchronous main-process demo, not using any worker</h1>
+    <h1>Synchronous main-process demo</h1>
     
     <div id="editor-container"></div>
     <div><button id="execute" disabled>Execute</button></div>
     
     <div class="file-upload">
-      <label for="sql-file">Upload SQL file:</label>
-      <input type="file" id="sql-file" accept=".sql">
-      <button id="execute-file" disabled>Run SQL File</button>
+      <label for="sql-file">Upload File:</label>
+      <input type="file" id="sql-file" accept=".sql,.json">
+      <button id="execute-file" disabled>Run File</button>
       <div id="sql-file-info"></div>
     </div>
-    
-    <button id="run-sample-queries">Run Hammel DB Setup queries</button>
 
     <pre id="timestamp"></pre>
     <div id="output"></div>

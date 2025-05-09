@@ -1,7 +1,6 @@
 // Copyright 2024 Roy T. Hashimoto. All Rights Reserved.
 
 import * as SQLite from '../src/sqlite-api.js';
-import sampleQueries from './hammel-db-setup.queries.js';
 
 // This is the path to the Monaco editor distribution. For development
 // this loads from the local server (uses Yarn 2 path).
@@ -194,11 +193,50 @@ function executeSingleQuery(sql, queryArguments) {
   }
 }
 
+/**
+ * Run a series of sample queries from a JSON file
+ * @param {Array} sampleQueries - Array of query objects with query and optional params
+ */
+async function runSampleQueries(sampleQueries) {
+  const timestamp = document.getElementById('timestamp');
+  timestamp.textContent = new Date().toLocaleTimeString();
+  const timing = [
+    ["start", performance.now()],
+  ];
+
+  for (let i = 0; i < sampleQueries.length; i++) {
+    if (sampleQueries[i]["checkpoint"]) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      timing.push([sampleQueries[i]["checkpoint"], performance.now()]);
+    }
+
+    const query = sampleQueries[i]["query"];
+    const params = sampleQueries[i]["params"];
+    executeSingleQuery(query, params);
+
+    // sleep for 10ms every 1000 queries
+    if (i % 1000 === 0) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  }
+  timing.push(["end", performance.now()]);
+  
+  const periods = {};
+  for (let i = 0; i < timing.length - 1; i++) {
+    const name = timing[i][0];
+    const start = timing[i][1];
+    const end = timing[i + 1][1];
+    periods[name] = `${(end - start).toFixed(1)}ms`;
+  }
+  const totalDuration = timing[timing.length - 1][1] - timing[0][1];
+
+  timestamp.textContent = ` ${(totalDuration).toFixed(1)} msec (periods: ${JSON.stringify(periods, null, 2)})`;
+}
+
 async function init() {
   // Load the Monaco editor
   const executeButton = /** @type {HTMLButtonElement} */(document.getElementById('execute'));
   const executeFileButton = /** @type {HTMLButtonElement} */(document.getElementById('execute-file'));
-  const runSampleButton = /** @type {HTMLButtonElement} */(document.getElementById('run-sample-queries'));
   const fileInput = /** @type {HTMLInputElement} */(document.getElementById('sql-file'));
   const fileInfo = document.getElementById('sql-file-info');
   
@@ -234,44 +272,6 @@ async function init() {
     executeFileButton.disabled = false;
   }
 
-  runSampleButton.addEventListener('click', async function() {
-    runSampleButton.disabled = true;
-    const timestamp = document.getElementById('timestamp');
-    timestamp.textContent = new Date().toLocaleTimeString();
-    const timing = [
-      ["start", performance.now()],
-    ]
-
-    for (let i = 0; i < sampleQueries.length; i++) {
-      if (sampleQueries[i]["checkpoint"]) {
-        await new Promise(resolve => setTimeout(resolve, 10));
-        timing.push([sampleQueries[i]["checkpoint"], performance.now()]);
-      }
-
-      const query = sampleQueries[i]["query"];
-      const params = sampleQueries[i]["params"];
-      executeSingleQuery(query, params);
-
-      // sleep for 10ms every 1000 queries
-      if (i % 1000 === 0) {
-        await new Promise(resolve => setTimeout(resolve, 10));
-      }
-    }
-    timing.push(["end", performance.now()]);
-    
-    const periods = {};
-    for (let i = 0; i < timing.length - 1; i++) {
-      const name = timing[i][0];
-      const start = timing[i][1];
-      const end = timing[i + 1][1];
-      periods[name] = `${(end - start).toFixed(1)}ms`;
-    }
-    const totalDuration = timing[timing.length - 1][1] - timing[0][1];
-
-    timestamp.textContent = ` ${(totalDuration).toFixed(1)} msec (periods: ${JSON.stringify(periods, null, 2)})`;
-    runSampleButton.disabled = false;
-  });
-
   // Handle file selection
   fileInput.addEventListener('change', function() {
     if (fileInput.files && fileInput.files.length > 0) {
@@ -285,14 +285,14 @@ async function init() {
   // Execute SQL file on button click
   executeFileButton.addEventListener('click', async function() {
     if (!fileInput.files || fileInput.files.length === 0) {
-      alert('Please select a SQL file first');
+      alert('Please select a file first');
       return;
     }
 
     executeButton.disabled = true;
     executeFileButton.disabled = true;
 
-    // Read the SQL file
+    // Read the file
     const file = fileInput.files[0];
     const fileContent = await file.text();
     
@@ -303,18 +303,31 @@ async function init() {
     const timestamp = document.getElementById('timestamp');
     timestamp.textContent = `${new Date().toLocaleTimeString()} - Processing ${file.name}`;
 
-    // Execute the SQL and process results
-    const time = performance.now();
-    const response = await executeSQL(fileContent);
-    timestamp.textContent += ` (${(performance.now() - time).toFixed(1)} milliseconds)`;
+    // Check file extension to determine how to process
+    const fileExtension = file.name.split('.').pop().toLowerCase();
     
-    if (response.results) {
-      // Format the results as tables
-      response.results
-        .map(formatTable)
-        .forEach(table => output.append(table));        
+    if (fileExtension === 'json') {
+      // Process JSON file as sample queries
+      try {
+        const sampleQueries = JSON.parse(fileContent);
+        await runSampleQueries(sampleQueries);
+      } catch (e) {
+        output.innerHTML = `<pre>Error parsing JSON: ${e.message}</pre>`;
+      }
     } else {
-      output.innerHTML = `<pre>${response.error.message}</pre>`;
+      // Process as SQL file (default behavior)
+      const time = performance.now();
+      const response = await executeSQL(fileContent);
+      timestamp.textContent += ` (${(performance.now() - time).toFixed(1)} milliseconds)`;
+      
+      if (response.results) {
+        // Format the results as tables
+        response.results
+          .map(formatTable)
+          .forEach(table => output.append(table));        
+      } else {
+        output.innerHTML = `<pre>${response.error.message}</pre>`;
+      }
     }
     
     executeButton.disabled = false;
