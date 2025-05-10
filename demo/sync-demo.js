@@ -201,36 +201,60 @@ async function runSampleQueries(sampleQueries) {
   const timestamp = document.getElementById('timestamp');
   timestamp.textContent = new Date().toLocaleTimeString();
   const timing = [
-    ["start", performance.now()],
+    {checkpoint: "start", start: performance.now(), sleepTime: 0},
   ];
+  let sleepTime = 0;
+  let totalSleep = 0;
+  const sleepEvery = 500;
+  const sleepDuration = 30;
 
   for (let i = 0; i < sampleQueries.length; i++) {
     if (sampleQueries[i]["checkpoint"]) {
-      await new Promise(resolve => setTimeout(resolve, 10));
-      timing.push([sampleQueries[i]["checkpoint"], performance.now()]);
+      sleepTime += (sleepDuration * 3);
+      await new Promise(resolve => setTimeout(resolve, sleepDuration * 3));
+      
+      timing[timing.length - 1]["sleepTime"] = sleepTime;
+      totalSleep += sleepTime;
+      sleepTime = 0;
+      timing.push({
+        checkpoint: sampleQueries[i]["checkpoint"], 
+        start: performance.now(), 
+        sleepTime: 0
+      });
     }
 
     const query = sampleQueries[i]["query"];
-    const params = sampleQueries[i]["params"];
-    executeSingleQuery(query, params);
+    if (query) {
+      const params = sampleQueries[i]["params"];
+      executeSingleQuery(query, params);
+    }
 
-    // sleep for 10ms every 1000 queries
-    if (i % 1000 === 0) {
-      await new Promise(resolve => setTimeout(resolve, 10));
+    // sleep regularly, to permit background tasks to run
+    if (i % sleepEvery === 0) {
+      sleepTime += sleepDuration;
+      await new Promise(resolve => setTimeout(resolve, sleepDuration));
     }
   }
-  timing.push(["end", performance.now()]);
-  
+
+  timing[timing.length - 1]["sleepTime"] = sleepTime;
+  totalSleep += sleepTime;
+  timing.push({
+    checkpoint: "end", 
+    start: performance.now(), 
+    sleepTime: 0
+  });
+
   const periods = {};
   for (let i = 0; i < timing.length - 1; i++) {
-    const name = timing[i][0];
-    const start = timing[i][1];
-    const end = timing[i + 1][1];
-    periods[name] = `${(end - start).toFixed(1)}ms`;
+    const name = timing[i]["checkpoint"];
+    const start = timing[i]["start"];
+    const end = timing[i + 1]["start"];
+    const duration = end - start - timing[i]["sleepTime"];
+    periods[name] = `${duration.toFixed(1)}ms`;
   }
-  const totalDuration = timing[timing.length - 1][1] - timing[0][1];
+  const totalDuration = timing[timing.length - 1]["start"] - timing[0]["start"];
 
-  timestamp.textContent = ` ${(totalDuration).toFixed(1)} msec (periods: ${JSON.stringify(periods, null, 2)})`;
+  timestamp.textContent = ` ${(totalDuration - totalSleep).toFixed(1)} msec (${totalDuration.toFixed(1)} total, including ${totalSleep} msec sleep), periods: ${JSON.stringify(periods, null, 2)}`;
 }
 
 async function init() {
