@@ -31,15 +31,14 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
   // the header needs to be large enough to hold all the page lookups and free page indices
   // 128KB is roughly enough for a 1GB SQLite file
   #HEADER_SIZE = 131072;
+  #HEADER_VERSION = "YNABDB01"; // 8-byte version/magic identifier
   
   // Append-only storage structures
   /** @type {Map<number, number>} */ #pageIndex = new Map(); // Maps logical page index to physical offset
   /** @type {Set<number>} */ #freeOffsets = new Set(); // Set of offsets that can be reused
   #nextAppendOffset = this.#HEADER_SIZE; // First offset after the header
   
-  // Write queue for OPFS operations
-  #writeQueue = [];
-  #activeWrites = []; // Operations currently being processed
+  // No need for a write queue anymore as operations are passed directly
   
   /**
    * Initialize the worker with configuration
@@ -76,56 +75,15 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
     }
   }
 
-  /**
-   * Process a write operation, overriding base class
-   * @param {number} offset Start byte offset that was written
-   * @param {number} size Length of write
-   */
-  async processWrite(offset, size) {
-    // Queue page writes for OPFS
-    const { startPageIndex, endPageIndex } = this.#getAffectedPageRange(offset, size);
-    
-    // Queue these pages for writing to OPFS
-    for (let pageIndex = startPageIndex; pageIndex <= endPageIndex; pageIndex++) {
-      this.#writeQueue.push({
-        type: "page",
-        pageIndex
-      });
-    }
-  }
 
   /**
-   * Process a truncate operation, overriding base class
-   * @param {number} size New file size
-   */
-  async processTruncate(size) {
-    // Queue the truncate operation
-    this.#writeQueue.push({
-      type: "truncate",
-      size
-    });
-  }
-
-  /**
-   * Process a delete operation, overriding base class
-   */
-  async processDelete() {
-    // Call the base implementation to update in-memory data
-    await super.processDelete();
-    
-    // Queue the delete operation
-    this.#writeQueue.push({
-      type: "delete"
-    });
-  }
-
-  /**
-   * Process the entire write queue to persist changes to OPFS.
+   * Process operations to persist changes to OPFS.
    * Uses an append-only approach to ensure atomicity.
+   * @param {Array<PendingOperation>} operations - Array of operations to process
    */
-  async processWriteQueue() {
+  async processWriteQueue(operations) {
     // If nothing to process, exit early
-    if (this.#activeWrites.length === 0 && this.#writeQueue.length === 0) {
+    if (!operations || operations.length === 0) {
       return;
     }
 
@@ -138,22 +96,18 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
         throw new Error("No access handle available for OPFS file");
       }
 
-      // If we have pending active writes from a previous interrupted operation, process them first
-      const priorWriteCount = this.#activeWrites.length;
-      const newWrites = this.#writeQueue.splice(0);
-      this.#activeWrites = this.#activeWrites.concat(newWrites);
-      console.log(`EncryptedOPFSWorker | Processing ${(priorWriteCount + newWrites.length)} write operations${(priorWriteCount > 0) ? ` (${priorWriteCount} from prior failed attempt)` : ""}`);
-
       // Track dirty pages that need to be written
       /** @type {Set<number>} */ let dirtyPages = new Set();
       /** @type {Map<number, number>} */ let updatedPageIndex = new Map(this.#pageIndex);
+      for (const operation of operations) {
+        if (operation.type === 'write') {
+          // For write operations, determine the affected pages
+          const { startPageIndex, endPageIndex } = this.#getAffectedPageRange(operation.offset, operation.size);
 
-      // Process all operations in order
-      for (const operation of this.#activeWrites) {       
-        if (operation.type === "page") {
-          dirtyPages.add(operation.pageIndex);
-
-        } else if (operation.type === "truncate") {
+          for (let pageIndex = startPageIndex; pageIndex <= endPageIndex; pageIndex++) {
+            dirtyPages.add(pageIndex);
+          }
+        } else if (operation.type === 'truncate') {
           const size = operation.size;
           const truncatePageIndex = this.#getPageIndex(size);
 
@@ -164,16 +118,12 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
               dirtyPages.delete(pageIdx);
             }
           }
-
-        } else if (operation.type === "delete") {
+        } else if (operation.type === 'delete') {
           // Clear everything
-          dirtyPages.clear();
           updatedPageIndex.clear();
-          
+          dirtyPages.clear();
+          // Create a whole new file
           await this.#processDeleteOperation();
-          // Need to recreate access handle after delete
-          // Operations after a delete would be for a new file, so we'll break the loop after this
-          break;
         }
       }
 
@@ -181,7 +131,6 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
       if (dirtyPages.size > 0) {
         const writePages = Array.from(dirtyPages)
         const offsets = await this.#writePages(writePages);
-        
         // Update the page index with new locations
         for (let i = 0; i < offsets.length; i++) {
           const pageIndex = writePages[i];
@@ -189,33 +138,22 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
           updatedPageIndex.set(pageIndex, offset);
           writtenPageCount++;
         }
-      }
 
-      // Write the updated page index as the last step
-      if (dirtyPages.size > 0) {
+        // Write the updated page index as the last step
         await this.#writePageIndex(updatedPageIndex);
         // Update our in-memory page index to match what we wrote
         this.#pageIndex = updatedPageIndex;
       }
 
-      // All operations processed successfully
-      this.#activeWrites = [];
-      
       // Sync changes to disk
-      console.log(`EncryptedOPFSWorker | Flushing changes to disk...`);
       this.#accessHandle.flush();
 
     } catch (e) {
       console.error(`EncryptedOPFSWorker | Failed to process operation queue: ${e.message}`);
-      // Note: We don't clear activeWrites here so they can be retried on next call
+      // In this case, we don't retry old operations - we'll get a new state in the next message
     } finally {
       const end = performance.now();
-      console.log(`EncryptedOPFSWorker | Wrote ${writtenPageCount} pages in ${(end - start).toFixed(2)} ms`);
-
-      // If there are more operations in the queue, continue processing
-      if (this.#writeQueue.length > 0 || this.#activeWrites.length > 0) {
-        await this.processWriteQueue();
-      }
+      console.log(`EncryptedOPFSWorker | Wrote ${writtenPageCount} pages in ${(end - start).toFixed(1)} ms`);
     }
   }
 
@@ -287,24 +225,46 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
       freeOffsets: Array.from(this.#freeOffsets),
       entries: entries,
     };
-    
+
     // Serialize to JSON and convert to a buffer
     const serialized = JSON.stringify(indexData);
     const encoder = new TextEncoder();
     const rawData = encoder.encode(serialized);
-    
+
     // Encrypt the header data
     const { encryptedData, iv } = await this.#encryptData(rawData);
-    
-    // Prepare the header buffer: IV + encrypted data
+
+    // Prepare the header buffer with new format
     const headerBuffer = new Uint8Array(this.#HEADER_SIZE);
     headerBuffer.fill(0); // Initialize to zeros
-    headerBuffer.set(iv, 0); // IV at the beginning
-    headerBuffer.set(encryptedData, this.#IV_SIZE); // Encrypted data right after the IV
-    
+
+    // Calculate the positions based on sizes
+    const versionBytes = encoder.encode(this.#HEADER_VERSION);      // 8 bytes
+    const ivSize = this.#IV_SIZE;                                   // 12 bytes
+    const lengthSize = 4;                                           // 4 bytes (uint32)
+
+    let position = 0;
+
+    // 1. Write header version
+    headerBuffer.set(versionBytes, position);
+    position += versionBytes.length;
+
+    // 2. Write IV
+    headerBuffer.set(iv, position);
+    position += ivSize;
+
+    // 3. Write encrypted data length (4 bytes, little-endian uint32)
+    const dataLength = encryptedData.byteLength;
+    const dataView = new DataView(headerBuffer.buffer, position, lengthSize);
+    dataView.setUint32(0, dataLength, true); // true = little-endian
+    position += lengthSize;
+
+    // 4. Write encrypted data
+    headerBuffer.set(encryptedData, position);
+
     // Write the header to the start of the file
     const bytesWritten = this.#accessHandle.write(headerBuffer, { at: 0 });
-    
+
     if (bytesWritten !== headerBuffer.length) {
       throw new Error(`Failed to write entire header. Wrote ${bytesWritten} of ${headerBuffer.length} bytes`);
     }
@@ -318,42 +278,60 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
     try {
       // Get the file size using the access handle
       const fileSize = this.#accessHandle.getSize();
-      
-      // If the file is too small to have a header, return an empty index
-      if (fileSize < this.#HEADER_SIZE) {
+      const versionSize = this.#HEADER_VERSION.length; // 8 bytes
+      const prefixSize = versionSize + this.#IV_SIZE + 4; // 4 bytes for length field
+
+      // If the file is too small to have a minimal header, return an empty index
+      if (fileSize < prefixSize) {
+        console.log(`EncryptedOPFSWorker | File too small for header: ${fileSize} bytes`);
         return new Map();
       }
-      
-      // Read the header
-      const headerBuffer = new Uint8Array(this.#HEADER_SIZE);
-      const bytesRead = this.#accessHandle.read(headerBuffer, { at: 0 });
-      
-      if (bytesRead !== this.#HEADER_SIZE) {
-        console.warn(`EncryptedOPFSWorker | Read only ${bytesRead} bytes from header`);
-        return new Map();
-      }
-      
-      // Extract the IV from the beginning of the header
-      const iv = headerBuffer.slice(0, this.#IV_SIZE);
-      
-      // Extract the encrypted data
-      const encryptedData = headerBuffer.slice(this.#IV_SIZE);
-      
-      // Decrypt the header data
-      const decryptedData = await this.#decryptData(encryptedData, iv);
-      
-      // Parse the decrypted data
+
+      // First read just the header prefix to check version and get data length
+      const headerPrefix = new Uint8Array(prefixSize);
+      this.#accessHandle.read(headerPrefix, { at: 0 });
+      let position = 0;
+
+      // 1. Check header version
       const decoder = new TextDecoder();
+      const version = decoder.decode(headerPrefix.slice(0, versionSize));
+      position += versionSize;
+
+      if (version !== this.#HEADER_VERSION) {
+        console.warn(`EncryptedOPFSWorker | Invalid header version: ${version}`);
+        return new Map();
+      }
+
+      // 2. Extract the IV
+      const iv = headerPrefix.slice(position, position + this.#IV_SIZE);
+      position += this.#IV_SIZE;
+
+      // 3. Get the encrypted data length
+      const dataView = new DataView(headerPrefix.buffer, position, 4);
+      const dataLength = dataView.getUint32(0, true); // true = little-endian
+
+      // Validate the data length to prevent reading garbage
+      if (dataLength <= 0 || dataLength > (this.#HEADER_SIZE - prefixSize)) {
+        console.warn(`EncryptedOPFSWorker | Invalid encrypted data length: ${dataLength}`);
+        return new Map();
+      }
+
+      // 4. Read the encrypted data at the position right after the prefix
+      const encryptedData = new Uint8Array(dataLength);
+      this.#accessHandle.read(encryptedData, { at: prefixSize });
+
+      // Decrypt and parse the header data
+      const decryptedData = await this.#decryptData(encryptedData, iv);
       const jsonStr = decoder.decode(decryptedData);
       const indexData = JSON.parse(jsonStr);
-            
+
       // Update our next append offset and free offsets
       this.#nextAppendOffset = indexData.nextAppendOffset || this.#HEADER_SIZE;
       this.#freeOffsets = new Set(indexData.freeOffsets || []);
-      
-      // Convert the entries to a Map
-      return new Map(indexData.entries);
-      
+
+      // Convert the page index entries to a Map
+      const pageIndex = new Map(indexData.entries);
+      return pageIndex;
     } catch (e) {
       console.warn(`EncryptedOPFSWorker | Failed to read page index: ${e.message}`);
       return new Map();

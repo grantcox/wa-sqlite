@@ -23,9 +23,12 @@ export class BaseWriteWorker {
   /** @type {ArrayBuffer} */ #fileData = null;
   #initialized = false;
   #encryptionKey = null;
-  
+
   // Concurrency control
   #processingOperations = false;
+
+  // Queue for 'writes' messages
+  /** @type {Array<{operations: Array, databaseState: Uint8Array}>} */ #writeMessageQueue = [];
   
   constructor() {
     // Set up the message handler
@@ -57,10 +60,11 @@ export class BaseWriteWorker {
   }
 
   /**
-   * Process a write queue of pending operations
+   * Process a set of operations
    * This method should be overridden by subclasses
+   * @param {Array<PendingOperation>} operations - Array of operations to process
    */
-  async processWriteQueue() {
+  async processWriteQueue(operations) {
     // This method should be overridden by subclasses
     throw new Error('processWriteQueue() must be implemented by subclass');
   }
@@ -130,30 +134,6 @@ export class BaseWriteWorker {
   }
 
   /**
-   * Process a write operation
-   * @param {number} offset Data that was changed
-   * @param {number} size Number of bytes
-   */
-  async processWrite(offset, size) {
-    // just exists as a hook for subclasses
-  }
-
-  /**
-   * Process a truncate operation
-   * @param {number} size New file size
-   */
-  async processTruncate(size) {
-    // just exists as a hook for subclasses
-  }
-
-  /**
-   * Process a delete operation
-   */
-  async processDelete() {
-    this.#fileData = new ArrayBuffer(0);
-  }
-
-  /**
    * Handle message received from main thread
    * @param {MessageEvent} e Message event
    */
@@ -199,51 +179,53 @@ export class BaseWriteWorker {
   }
 
   /**
-   * Process operations in a batch (protected by concurrency lock)
-   * @param {Array<PendingOperation>} operations - Array of operations to process
-   */
-  async #processOperations(operations) {
-    // check (and get) the processing lock
-    if (this.#processingOperations) {
-      return;
-    }
-    this.#processingOperations = true;
-    
-    try {
-      // Process each operation (even though we're replacing the entire file data,
-      // subclasses may need these to be called to track dirty pages or other state)
-      for (const operation of operations) {
-        if (operation.type === 'write') {
-          await this.processWrite(operation.offset, operation.size);
-        } else if (operation.type === 'truncate') {
-          await this.processTruncate(operation.size);
-        } else if (operation.type === 'delete') {
-          await this.processDelete();
-        }
-      }
-      
-      // Call processWriteQueue to allow subclasses to persist changes
-      await this.processWriteQueue();
-    } finally {
-      this.#processingOperations = false;
-    }
-  }
-
-  /**
    * Handle a batch of write operations and a new database state
    * @param {Array<PendingOperation>} operations - Array of operations that were performed
    * @param {Uint8Array} databaseState - The new complete database state
    */
   #handleWrites(operations, databaseState) {
-    // Replace the entire file data with the new state
-    this.#fileData = databaseState.buffer;
-    
-    // Process the operations to allow subclasses to track changes
-    if (operations.length > 0) {
-      this.#processOperations(operations);
-    } else {
-      // If no specific operations, still call processWriteQueue
-      this.processWriteQueue();
+    // Add this message to the queue
+    this.#writeMessageQueue.push({
+      operations,
+      databaseState
+    });
+
+    // Start processing the queue (will exit immediately if already running)
+    this.#processWriteMessageQueue();
+  }
+
+  /**
+   * Process queued write messages
+   */
+  async #processWriteMessageQueue() {
+    // If already processing, exit early - the current processor will handle new items
+    if (this.#processingOperations) {
+      return;
+    }
+
+    // Set processing flag
+    this.#processingOperations = true;
+
+    try {
+      // Process all messages in the queue
+      while (this.#writeMessageQueue.length > 0) {
+        const message = this.#writeMessageQueue.shift();
+
+        // Update the in-memory database state
+        this.#fileData = message.databaseState.buffer;
+
+        // Call processWriteQueue to allow subclasses to persist changes with all operations
+        await this.processWriteQueue(message.operations);
+      }
+    } finally {
+      // Clear processing flag
+      this.#processingOperations = false;
+
+      // If new messages arrived while we were processing, start processing again
+      if (this.#writeMessageQueue.length > 0) {
+        // Use setTimeout to prevent stack overflow with deep recursion
+        setTimeout(() => this.#processWriteMessageQueue(), 0);
+      }
     }
   }
 }
