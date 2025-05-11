@@ -43,33 +43,6 @@ const searchParams = new URLSearchParams(location.search);
     vfsModule: '../src/examples/MemoryVFS.js',
   },
   {
-    name: 'MemoryDelayedOPFSVFS',
-    vfsModule: '../src/examples/MemoryDelayedOPFSVFS.js',
-  },
-  {
-    name: 'MemoryDelayedEncryptedOPFSVFS',
-    vfsModule: '../src/examples/MemoryDelayedOPFSVFS.js',
-    vfsOptions: { 
-      encryptionPassword: searchParams.get('password') || 'abcd123'
-    }
-  },
-  {
-    name: 'SMPAWPermutedVFS',
-    vfsModule: '../src/examples/SyncMemoryProxyAsyncWorkerVFS.js',
-    vfsOptions: { 
-      encryptionPassword: searchParams.get('password') || 'abcd123',
-      workerUrl: new URL('../src/examples/EncryptedPermutedOPFSWorker.js', import.meta.url).toString()
-    }
-  },
-  {
-    name: 'SMPAWIndexedDbVFS',
-    vfsModule: '../src/examples/SyncMemoryProxyAsyncWorkerVFS.js',
-    vfsOptions: { 
-      encryptionPassword: searchParams.get('password') || 'abcd123',
-      workerUrl: new URL('../src/examples/EncryptedIndexedDbWorker.js', import.meta.url).toString()
-    }
-  },
-  {
     name: 'SMPAWOPFSVFS',
     vfsModule: '../src/examples/SyncMemoryProxyAsyncWorkerVFS.js',
     vfsOptions: { 

@@ -44,6 +44,14 @@ const searchParams = new URLSearchParams(location.search);
     }
   },
   {
+    name: 'SMPAWOPFSVFS',
+    vfsModule: '../src/examples/SyncMemoryProxyAsyncWorkerVFS.js',
+    vfsOptions: { 
+      encryptionPassword: searchParams.get('password') || 'abcd123',
+      workerUrl: new URL('../src/examples/EncryptedOPFSWorker.js', import.meta.url).toString()
+    }
+  },
+  {
     name: 'MemoryAsyncVFS',
     vfsModule: '../src/examples/MemoryAsyncVFS.js',
   },
