@@ -162,7 +162,10 @@ function executeSQL(query) {
   }
 }
 
-function executeSingleQuery(sql, queryArguments) {
+function executeSingleQuery(query) {
+  const sql = query["query"];
+  const multiParams = query["groupedParams"] ?? [query["params"]];
+
   try {
     const statements = sqlite3.syncStatements(db, sql, { unscoped: true });
 
@@ -170,20 +173,22 @@ function executeSingleQuery(sql, queryArguments) {
     const statementsArray = Array.from(statements);
     const stmt = statementsArray[0];
 
-    // Bind parameters if provided
-    if (queryArguments && queryArguments.length > 0) {
-        sqlite3.bind_collection(stmt, queryArguments);
-    }
-
     let columnNames;
-    const rows = [];
-    while (sqlite3.syncStep(stmt) === SQLite.SQLITE_ROW) {
-        const rowData = sqlite3.row(stmt);
-        columnNames = columnNames ?? sqlite3.column_names(stmt);
-        rows.push(rowData);
-    }
+    for (const params of multiParams) {
+      if (params) {
+        sqlite3.bind_collection(stmt, params);
+      }
 
-    const rowsModified = sqlite3.changes(db);
+      const rows = [];
+      while (sqlite3.syncStep(stmt) === SQLite.SQLITE_ROW) {
+          const rowData = sqlite3.row(stmt);
+          columnNames = columnNames ?? sqlite3.column_names(stmt);
+          rows.push(rowData);
+      }
+
+      const rowsModified = sqlite3.changes(db);
+      sqlite3.syncReset(stmt);
+    }
 
     // release the statement handle
     sqlite3.syncFinalize(stmt);
@@ -191,6 +196,33 @@ function executeSingleQuery(sql, queryArguments) {
     console.error(`Error with SQL statement ${sql}`, e);
     throw e;
   }
+}
+
+async function groupSampleQueries(sampleQueries) {
+  const results = [];
+
+  for (let i = 0; i < sampleQueries.length; i++) {
+    const query = sampleQueries[i];
+    const sql = query["query"];
+    const groupedParams = [query["params"]];
+    
+    // find all immediately following queries that are identical, group the params
+    while (i + 1 < sampleQueries.length && sampleQueries[i + 1]["query"] === sql) {
+      i++;
+      groupedParams.push(sampleQueries[i]["params"]);
+    }
+
+    if (groupedParams.length === 1) {
+      results.push(query);
+    } else {
+      results.push({
+        query: sql,
+        groupedParams: groupedParams
+      });
+    }
+  }
+
+  console.log(`Grouped all sample queries, from ${sampleQueries.length} to ${results.length}`);
 }
 
 /**
@@ -223,10 +255,9 @@ async function runSampleQueries(sampleQueries) {
       });
     }
 
-    const query = sampleQueries[i]["query"];
-    if (query) {
-      const params = sampleQueries[i]["params"];
-      executeSingleQuery(query, params);
+    const sql = sampleQueries[i]["query"];
+    if (sql) {
+      executeSingleQuery(sampleQueries[i]);
     }
 
     // sleep regularly, to permit background tasks to run
@@ -254,7 +285,7 @@ async function runSampleQueries(sampleQueries) {
   }
   const totalDuration = timing[timing.length - 1]["start"] - timing[0]["start"];
 
-  timestamp.textContent = ` ${(totalDuration - totalSleep).toFixed(1)} msec (${totalDuration.toFixed(1)} total, including ${totalSleep} msec sleep), periods: ${JSON.stringify(periods, null, 2)}`;
+  timestamp.textContent = `${(totalDuration - totalSleep).toFixed(1)} msec (${totalDuration.toFixed(1)} total, including ${totalSleep} msec sleep), periods: ${JSON.stringify(periods, null, 2)}`;
 }
 
 async function init() {
@@ -334,6 +365,7 @@ async function init() {
       // Process JSON file as sample queries
       try {
         const sampleQueries = JSON.parse(fileContent);
+        // await groupSampleQueries(sampleQueries);
         await runSampleQueries(sampleQueries);
       } catch (e) {
         output.innerHTML = `<pre>Error parsing JSON: ${e.message}</pre>`;

@@ -581,6 +581,16 @@ export function Factory(Module) {
     };
   })();
 
+  sqlite3.syncReset = (function () {
+    const fname = "sqlite3_reset";
+    const f = Module.cwrap(fname, ...decl("n:n"), { async: false });
+    return function (stmt) {
+      verifyStatement(stmt);
+      const result = f(stmt);
+      return check(fname, result, mapStmtToDB.get(stmt));
+    };
+  })();
+
   sqlite3.result = function(context, value) {
     switch (typeof value) {
       case 'number':

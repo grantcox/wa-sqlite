@@ -622,6 +622,7 @@ declare interface SQLiteAPI {
    * @returns Promise-wrapped `SQLITE_OK` (rejects on error)
    */
   reset(stmt: number): Promise<number>;
+  syncReset(stmt: number): number;
 
   /**
    * Convenience function to call `result_*` based of the type of `value`
