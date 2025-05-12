@@ -23,6 +23,9 @@ export class AsyncWorkerCommitHook {
 
   #db = null;
 
+  #syncCount = 0;
+  #syncDuration = 0;
+
   _debouncedSyncToWorker = this.debounce(this._syncToWorker.bind(this), 25);
 
   /**
@@ -120,8 +123,8 @@ export class AsyncWorkerCommitHook {
    */
   _syncToWorker() {
     console.log("Syncing database state to worker...");
+    const start = performance.now();
     for (let db of this.#sqlite3.serialize(this.#db)) {
-
       // Create a copy of the database to send to the worker
       const dbCopy = new Uint8Array(db.byteLength);
       dbCopy.set(new Uint8Array(db, 0, db.byteLength));
@@ -132,5 +135,10 @@ export class AsyncWorkerCommitHook {
         databaseState: dbCopy
       }, [dbCopy.buffer]);
     }
+
+    const end = performance.now();
+    this.#syncCount++;
+    this.#syncDuration += (end - start);
+    console.log(`SyncWorker | Sync completed in ${(end - start).toFixed(1)} ms. Total sync count: ${this.#syncCount}, total duration: ${this.#syncDuration.toFixed(1)} ms`);
   }
 }

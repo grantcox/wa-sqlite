@@ -53,8 +53,9 @@ const searchParams = new URLSearchParams(location.search);
     hookOptions: { 
       encryptionPassword: searchParams.get('password') || 'abcd123',
       workerUrl: new URL('../src/examples/EncryptedOPFSWorker.js', import.meta.url).toString()
-    }
-  }
+    },
+    vfsModule: null
+  },
 ].map(config => [config.name, config]));
 
 // SQLite instance and database connection
@@ -69,8 +70,7 @@ async function initSQLite() {
     const configName = searchParams.get('config') || VFS_CONFIGS.keys().next().value;
     const config = VFS_CONFIGS.get(configName);
 
-    const dbName = searchParams.get('dbName') ?? 'hello';
-    const vfsName = searchParams.get('vfsName') ?? config.vfsName ?? 'demo';
+    let dbName = searchParams.get('dbName') ?? 'hello';
 
     // Instantiate SQLite
     const start = performance.now();
@@ -85,6 +85,7 @@ async function initSQLite() {
         dbName,
         ...config.vfsOptions
       };
+      const vfsName = searchParams.get('vfsName') ?? config.vfsName ?? 'demo';
       const vfs = await namespace[className].create(vfsName, module, vfsOptions);
       sqlite3.vfs_register(vfs, true);
     }
@@ -94,6 +95,8 @@ async function initSQLite() {
       hook = new AsyncWorkerCommitHook(sqlite3, module, config.hookOptions);
       // wait for the hook to be ready (load existing data from OPFS)
       await hook.isReady();
+      // when using this hook, we always use an in-memory database
+      dbName = ":memory:";
     }
 
     // Open the database
@@ -110,7 +113,7 @@ async function initSQLite() {
       if (initialData) {
         sqlite3.deserialize(db, initialData);
       }
-      
+
       // register the commit hook, so we sync regularly
       sqlite3.commit_hook(db, hook.commitHook.bind(hook));
     }
