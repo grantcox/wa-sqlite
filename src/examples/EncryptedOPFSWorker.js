@@ -75,6 +75,108 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
     }
   }
 
+  async sync(newDatabaseState) {
+    console.log("EncryptedOPFSWorker | Syncing database state, new state size:", newDatabaseState.byteLength);
+
+    if (!newDatabaseState || !this.#accessHandle) {
+      console.error("EncryptedOPFSWorker | Cannot sync without valid database state or access handle");
+      return;
+    }
+    let start = performance.now();
+
+    const currentData = this.getFileData();
+    const sourcePageSize = this.#sourcePageSize;
+    
+    // Track dirty pages that need to be written
+    /** @type {Set<number>} */ const dirtyPages = new Set();
+    /** @type {Map<number, number>} */ const updatedPageIndex = new Map(this.#pageIndex);
+    
+    // Calculate number of pages in each database state
+    const newPageCount = Math.ceil(newDatabaseState.byteLength / sourcePageSize);
+    const currentPageCount = currentData ? Math.ceil(currentData.byteLength / sourcePageSize) : 0;
+
+    // Create views for easier comparison
+    const newView = new Uint8Array(newDatabaseState);
+    const currentView = currentData ? new Uint8Array(currentData) : new Uint8Array(0);
+    
+    // Compare pages to identify changes
+    for (let pageIndex = 0; pageIndex < Math.max(newPageCount, currentPageCount); pageIndex++) {
+      const pageStart = pageIndex * sourcePageSize;
+      
+      // Handle truncation - remove pages beyond the new database size
+      if (pageIndex >= newPageCount && pageIndex < currentPageCount) {
+        // This page exists in current but not in new (truncated)
+        updatedPageIndex.delete(pageIndex);
+        continue;
+      }
+
+      // If page doesn't exist in current database, it's new and needs to be written
+      if (pageIndex >= currentPageCount) {
+        dirtyPages.add(pageIndex);
+        continue;
+      }
+      
+      // Compare page content to detect changes
+      const pageEnd = Math.min(pageStart + sourcePageSize, newDatabaseState.byteLength);
+      const bytesToCompare = pageEnd - pageStart;
+      
+      // Simple hash calculation by summing bytes (sufficient for change detection)
+      let currentPageHash = 0;
+      let newPageHash = 0;
+      
+      for (let i = 0; i < bytesToCompare; i++) {
+        const currentOffset = pageStart + i;
+        if (currentOffset < currentView.length) {
+          currentPageHash += currentView[currentOffset];
+        }
+        
+        newPageHash += newView[currentOffset];
+      }
+      
+      // If hash differs, page content has changed
+      if (currentPageHash !== newPageHash) {
+        dirtyPages.add(pageIndex);
+      }
+    }
+    console.log(`EncryptedOPFSWorker | Sync compared old and new database, found ${dirtyPages.size} dirty pages in ${(performance.now() - start).toFixed(1)} ms`);
+    
+    // Update the in-memory database state
+    this.setFileData(newDatabaseState);
+    
+    // Write all dirty pages
+    if (dirtyPages.size > 0) {
+      start = performance.now();
+      
+      // Write changed pages
+      try {
+        const writePages = Array.from(dirtyPages);
+        const offsets = await this.#writePages(writePages);
+        
+        // Update the page index with new locations
+        for (let i = 0; i < offsets.length; i++) {
+          const pageIndex = writePages[i];
+          const offset = offsets[i];
+          updatedPageIndex.set(pageIndex, offset);
+        }
+        
+        // Write the updated page index
+        await this.#writePageIndex(updatedPageIndex);
+        
+        // Update our in-memory page index
+        this.#pageIndex = updatedPageIndex;
+        
+        // Sync changes to disk
+        this.#accessHandle.flush();
+        
+        const end = performance.now();
+        console.log(`EncryptedOPFSWorker | Sync: Wrote ${dirtyPages.size} pages in ${(end - start).toFixed(1)} ms`);
+      } catch (e) {
+        console.error(`EncryptedOPFSWorker | Sync failed: ${e.message}`);
+      }
+    } else {
+      console.log(`EncryptedOPFSWorker | Sync: No page changes detected`);
+    }
+  }
 
   /**
    * Process operations to persist changes to OPFS.
@@ -373,10 +475,10 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
       );
       
       if (availableData > 0) {
-        const sourceData = new Uint8Array(fileData, pageStart, availableData);
+        const sourceData = new Uint8Array(fileData.slice(pageStart, pageStart + availableData))
         plainData.set(sourceData, 0);
       }
-      
+
       // Encrypt the page
       const { encryptedData, iv } = await this.#encryptData(plainData);
       
@@ -384,7 +486,7 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
       const combinedData = new Uint8Array(this.#IV_SIZE + encryptedData.byteLength);
       combinedData.set(iv, 0);
       combinedData.set(encryptedData, this.#IV_SIZE);
-      
+
       // Write the data to the file using the sync access handle at the chosen offset
       const bytesWritten = this.#accessHandle.write(combinedData, { at: offset });
       

@@ -273,3 +273,11 @@ export const SQLITE_LIMIT_WORKER_THREADS      = 11;
 export const SQLITE_PREPARE_PERSISTENT = 0x01;
 export const SQLITE_PREPARE_NORMALIZED = 0x02;
 export const SQLITE_PREPARE_NO_VTAB = 0x04;
+
+// Serialize flags
+export const SQLITE_SERIALIZE_NOCOPY = 0x001;
+
+// Deserialize flags
+export const SQLITE_DESERIALIZE_FREEONCLOSE = 0x001;
+export const SQLITE_DESERIALIZE_RESIZEABLE = 0x002;
+export const SQLITE_DESERIALIZE_READONLY = 0x004;

@@ -26,10 +26,14 @@ export class BaseWriteWorker {
 
   // Concurrency control
   #processingOperations = false;
+  #processingSync = false;
 
   // Queue for 'writes' messages
   /** @type {Array<{operations: Array, databaseState: Uint8Array}>} */ #writeMessageQueue = [];
   
+  // Queue for 'sync' messages
+  /** @type {Array<Uint8Array>} */ #syncQueue = [];
+
   constructor() {
     // Set up the message handler
     self.onmessage = this.#handleMessage.bind(this);
@@ -67,6 +71,10 @@ export class BaseWriteWorker {
   async processWriteQueue(operations) {
     // This method should be overridden by subclasses
     throw new Error('processWriteQueue() must be implemented by subclass');
+  }
+
+  async sync(databaseState) {
+    throw new Error('sync() must be implemented by subclass');
   }
 
   /**
@@ -173,6 +181,11 @@ export class BaseWriteWorker {
         this.#handleWrites(msg.operations, msg.databaseState);
         break;
         
+      case 'sync':
+        console.log('BaseWriteWorker | Sync message received');
+        await this.#handleSync(msg.databaseState);
+        break;
+
       default:
         console.error('BaseWriteWorker | Unknown message type:', msg.type);
     }
@@ -225,6 +238,40 @@ export class BaseWriteWorker {
       if (this.#writeMessageQueue.length > 0) {
         // Use setTimeout to prevent stack overflow with deep recursion
         setTimeout(() => this.#processWriteMessageQueue(), 0);
+      }
+    }
+  }
+
+  /**
+   * Handle a batch of write operations and a new database state
+   * @param {Uint8Array} databaseState - The new complete database state
+   */
+  #handleSync(databaseState) {
+    this.#syncQueue.push(databaseState);
+    this.#processSyncQueue();
+  }
+
+  /**
+   * Process queued sync messages
+   */
+  async #processSyncQueue() {
+    // If already processing, exit early - the current processor will handle new items
+    if (this.#processingSync) {
+      return;
+    }
+    this.#processingSync = true;
+
+    try {
+      while (this.#syncQueue.length > 0) {
+        const databaseState = this.#syncQueue.shift();
+        await this.sync(databaseState);
+      }
+    } finally {
+      this.#processingSync = false;
+
+      // If new messages arrived while we were processing, start processing again
+      if (this.#syncQueue.length > 0) {
+        setTimeout(() => this.#processSyncQueue(), 0);
       }
     }
   }

@@ -1003,6 +1003,78 @@ export function Factory(Module) {
     return check('sqlite3_vfs_register', result);
   };
 
+  sqlite3.serialize = (function () {
+    const fname = "sqlite3_serialize";
+    const f = Module.cwrap(fname, ...decl("nsnn:n"));
+    return function* (db, schema = null) {
+      verifyDatabase(db);
+
+      // Create a pointer to receive the size of the serialized database
+      const sizePtr = tmpPtr[0];
+
+      // First try with SQLITE_SERIALIZE_NOCOPY flag
+      let serializedPtr = f(db, schema, sizePtr, SQLite.SQLITE_SERIALIZE_NOCOPY);
+      let isCopy = false;
+      // If we cannot get a "no-copy" buffer (returns NULL), try again without the NOCOPY flag
+      if (serializedPtr === 0) {
+        serializedPtr = f(db, schema, sizePtr, 0);
+        isCopy = true;
+      }
+
+      // If we still get NULL, there was a more serious error
+      if (serializedPtr === 0) {
+        throw new SQLiteError("Failed to serialize database", SQLite.SQLITE_ERROR);
+      }
+
+      // Get the size that was written to the size pointer
+      const size = Module.getValue(sizePtr, "*");
+
+      // Create a Uint8Array view of the serialized data
+      const databaseBuffer = new Uint8Array(Module.HEAPU8.buffer, serializedPtr, size);
+
+      // yield this buffer to the caller
+      yield databaseBuffer;
+
+      // If we allocated memory for the serialization, we need to free it
+      if (isCopy) {
+        Module._sqlite3_free(serializedPtr);
+      }
+    };
+  })();
+
+  sqlite3.deserialize = (function () {
+    const fname = "sqlite3_deserialize";
+    const f = Module.cwrap(fname, ...decl("nsnnn:n"));
+    return function (db, data) {
+      verifyDatabase(db);
+      if (!(data instanceof Uint8Array)) {
+        throw new SQLiteError("Data must be a Uint8Array", SQLite.SQLITE_MISUSE);
+      }
+
+      const flags = SQLite.SQLITE_DESERIALIZE_FREEONCLOSE | SQLite.SQLITE_DESERIALIZE_RESIZEABLE;
+      let bufferSize = data.byteLength;
+      let dataPtr = 0;
+      let needToFreeOnError = false;
+
+      // allocate memory in WASM and copy the data
+      dataPtr = Module._sqlite3_malloc(bufferSize);
+      if (dataPtr === 0) {
+        throw new SQLiteError("Failed to allocate memory for deserialization", SQLite.SQLITE_NOMEM);
+      }
+      needToFreeOnError = true;
+      Module.HEAPU8.set(data, dataPtr);
+
+      // Call the deserialize function
+      const result = f(db, "main", dataPtr, bufferSize, bufferSize, flags);
+
+      // Check for errors
+      if (result !== SQLite.SQLITE_OK) {
+        throw new SQLiteError(`Deserialization failed with error code ${result}`, result);
+      }
+      return result;
+    };
+  })();
+
   function check(fname, result, db = null, allowed = [SQLite.SQLITE_OK]) {
     if (allowed.includes(result)) return result;
     const message = db ?

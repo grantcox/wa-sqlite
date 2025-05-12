@@ -1,6 +1,8 @@
 // Copyright 2024 Roy T. Hashimoto. All Rights Reserved.
 
 import * as SQLite from '../src/sqlite-api.js';
+import SQLiteESMFactory from '../dist/wa-sqlite.mjs';
+import { AsyncWorkerCommitHook } from '../src/examples/AsyncWorkerCommitHook.js'
 
 // This is the path to the Monaco editor distribution. For development
 // this loads from the local server (uses Yarn 2 path).
@@ -17,11 +19,6 @@ INSERT OR REPLACE INTO t VALUES ('good', 'bad'), ('hot', 'cold'), ('up', 'down')
 SELECT * FROM t;
 `.trim();
 
-const BUILDS = new Map([
-  ['default', '../dist/wa-sqlite.mjs'],
-  // ['default', '../debug/wa-sqlite.mjs'],
-]);
-
 const searchParams = new URLSearchParams(location.search);
 
 /**
@@ -31,6 +28,7 @@ const searchParams = new URLSearchParams(location.search);
  * @property {string} [vfsClassName] name of the VFS class
  * @property {string} [vfsName] name of the VFS instance
  * @property {object} [vfsOptions] VFS constructor arguments
+ * @property {object} [hookOptions] Commit Hook options
  */
 
 /** @type {Map<string, Config>} */ const VFS_CONFIGS = new Map([
@@ -49,11 +47,18 @@ const searchParams = new URLSearchParams(location.search);
       encryptionPassword: searchParams.get('password') || 'abcd123',
       workerUrl: new URL('../src/examples/EncryptedOPFSWorker.js', import.meta.url).toString()
     }
+  },
+  {
+    name: 'CommitHook',
+    hookOptions: { 
+      encryptionPassword: searchParams.get('password') || 'abcd123',
+      workerUrl: new URL('../src/examples/EncryptedOPFSWorker.js', import.meta.url).toString()
+    }
   }
 ].map(config => [config.name, config]));
 
 // SQLite instance and database connection
-let sqlite3;
+/** @type {SQLiteAPI} */ let sqlite3;
 let db;
 
 // Initialize SQLite with the selected VFS
@@ -61,7 +66,6 @@ async function initSQLite() {
   try {
     await maybeReset(searchParams);
     
-    const buildName = searchParams.get('build') || BUILDS.keys().next().value;
     const configName = searchParams.get('config') || VFS_CONFIGS.keys().next().value;
     const config = VFS_CONFIGS.get(configName);
 
@@ -70,8 +74,7 @@ async function initSQLite() {
 
     // Instantiate SQLite
     const start = performance.now();
-    const { default: moduleFactory } = await import(BUILDS.get(buildName));
-    const module = await moduleFactory();
+    const module = await SQLiteESMFactory();
     sqlite3 = SQLite.Factory(module);
 
     if (config.vfsModule) {
@@ -86,10 +89,31 @@ async function initSQLite() {
       sqlite3.vfs_register(vfs, true);
     }
 
+    let hook = null;
+    if (config.hookOptions) {
+      hook = new AsyncWorkerCommitHook(sqlite3, module, config.hookOptions);
+      // wait for the hook to be ready (load existing data from OPFS)
+      await hook.isReady();
+    }
+
     // Open the database
     db = sqlite3.syncOpen(dbName);
     const end = performance.now();
     console.log(`SQLite opened ${dbName} in ${(end - start).toFixed(2)} ms`);
+
+    if (hook) {
+      // tell the hook what SQLite db is being used, required for serialization
+      hook.useDatabase(db);
+
+      // load initial data into SQLite's in-memory db
+      const initialData = hook.popInitialData();
+      if (initialData) {
+        sqlite3.deserialize(db, initialData);
+      }
+      
+      // register the commit hook, so we sync regularly
+      sqlite3.commit_hook(db, hook.commitHook.bind(hook));
+    }
 
     sqlite3.syncExec(db, 'PRAGMA cache_size=-64000');
     sqlite3.syncExec(db, 'PRAGMA journal_mode=MEMORY');

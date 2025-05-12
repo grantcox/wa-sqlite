@@ -65,6 +65,7 @@ To serve the demo directly from the source tree:
 The demo page provides access to databases on multiple VFS implementations. Query parameters on the demo page URL can be used to specify the configuration and initial state:
 
 - Completely synchronous, writes to OPFS lazily with encryption: http://localhost:8000/demo/sync-demo.html?build=default&config=SMPAWOPFSVFS&dbName=enc.sqlite
+- Synchronous and using WASM in-memory database, synced to OPFS via commit hook: http://localhost:8000/demo/sync-demo.html?config=CommitHook&dbName=commit-hook
 - Benchmarks of synchronous VFSs: http://localhost:8000/demo/benchmarks/?config=default,MemoryVFS;default,SMPAWOPFSVFS
 
 | Parameter | Purpose | Values | Default |
