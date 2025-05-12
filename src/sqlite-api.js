@@ -799,7 +799,7 @@ export function Factory(Module) {
     const onFinally = [];
     try {
       // Encode SQL string to UTF-8.
-      const utf8 = new TextEncoder().encode(sql);
+      const utf8 = textEncoder.encode(sql);
 
       // Copy encoded string to WebAssembly memory. The SQLite docs say
       // zero-termination is a minor optimization so add room for that.
