@@ -44,13 +44,13 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
   // Buffer for initial data loaded by the worker
   /** @type {ArrayBuffer} */ #initialData = null;
 
+  #writePushCadenceMsec = 25;
+
   // Array of pending operations to track what has changed
   /** @type {Array<PendingWriteOperation>} */ #pendingWrites = [];
 
   // Interval ID for the periodic write sender
   #writeIntervalId = null;
-
-  #debouncedSyncToWorker = null;
 
   /**
    * @param {string} name
@@ -72,10 +72,8 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
   constructor(name, module, options) {
     super(name, module);
     this.#dbName = options.dbName ?? "db.sqlite";
+    this.#writePushCadenceMsec = options.syncLatencyMsec ?? 25;
     this.#vfsReady = this.init(options);
-
-    const syncLatency = options.syncLatencyMsec ?? 25;
-    this.#debouncedSyncToWorker = this.debounce(this.#sendPendingWrites.bind(this), syncLatency);
   }
 
   async isReady() {
@@ -101,6 +99,9 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
             
             // Set up permanent message handler for ongoing communication
             this.#worker.addEventListener('message', this.#handleWorkerMessage.bind(this));
+            
+            // Start the interval for sending pending writes
+            this.#startWriteInterval();
             
             resolve(true);
           } else if (msg.type === 'error') {
@@ -151,6 +152,21 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
   }
 
   /**
+   * Start the interval for sending pending writes
+   */
+  #startWriteInterval() {
+    // Clear any existing interval
+    if (this.#writeIntervalId) {
+      clearInterval(this.#writeIntervalId);
+    }
+    
+    // Set up a new interval to regularly send pending writes
+    this.#writeIntervalId = setInterval(() => {
+      this.#sendPendingWrites();
+    }, this.#writePushCadenceMsec);
+  }
+
+  /**
    * Send any pending operations to the worker
    */
   #sendPendingWrites() {
@@ -191,7 +207,6 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
       offset,
       size: data.byteLength
     });
-    this.#debouncedSyncToWorker();
   }
 
   /**
@@ -204,7 +219,6 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
       type: 'truncate',
       size
     });
-    this.#debouncedSyncToWorker();
   }
 
   /**
@@ -215,7 +229,6 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
     this.#pendingWrites.push({
       type: 'delete'
     });
-    this.#debouncedSyncToWorker();
   }
 
   /**
@@ -447,24 +460,7 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
    * @param {number} byteOffset 
    * @param {number} byteLength 
    */
-    makeDataArray(byteOffset, byteLength) {
-      return this._module.HEAPU8.subarray(byteOffset, byteOffset + byteLength);
-    }
-
-    debounce(func, waitMsec) {
-      let timeout = null;
-      
-      const debouncedFunction = function(...args) {
-        if (timeout !== null) {
-          clearTimeout(timeout);
-        }
-        
-        timeout = setTimeout(() => {
-          timeout = null;
-          func(...args);
-        }, waitMsec);
-      };
-      
-      return debouncedFunction;
-    }
+  makeDataArray(byteOffset, byteLength) {
+    return this._module.HEAPU8.subarray(byteOffset, byteOffset + byteLength);
+  }
 }
