@@ -13,7 +13,7 @@ import * as VFS from "../VFS.js";
  * @typedef {Object} VFSConfig
  * @property {string} encryptionPassword
  * @property {string} dbName
- * @property {string} workerUrl
+ * @property {Worker | () => Worker} worker
  * @property {number} syncLatencyMsec
  */
 
@@ -55,11 +55,11 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
   /**
    * @param {string} name
    * @param {*} module
-   * @param {VFSConfig} options - Optional encryption key and configuration
+   * @param {VFSConfig} config - Optional encryption key and configuration
    * @returns {Promise<SyncMemoryProxyAsyncWorkerVFS>}
    */
-  static async create(name, module, options = {}) {
-    const vfs = new SyncMemoryProxyAsyncWorkerVFS(name, module, options);
+  static async create(name, module, config = {}) {
+    const vfs = new SyncMemoryProxyAsyncWorkerVFS(name, module, config);
     await vfs.isReady();
     return vfs;
   }
@@ -67,13 +67,14 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
   /**
    * @param {string} name
    * @param {*} module
-   * @param {VFSConfig} options
+   * @param {VFSConfig} config
    */
-  constructor(name, module, options) {
+  constructor(name, module, config) {
     super(name, module);
-    this.#dbName = options.dbName ?? "db.sqlite";
-    this.#writePushCadenceMsec = options.syncLatencyMsec ?? 25;
-    this.#vfsReady = this.init(options);
+    this.#dbName = config.dbName ?? "db.sqlite";
+    this.#writePushCadenceMsec = config.syncLatencyMsec ?? 25;
+    this.#worker = (config.worker instanceof Worker) ? config.worker : config.worker();
+    this.#vfsReady = this.init(config);
   }
 
   async isReady() {
@@ -85,9 +86,6 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
    */
   async init(config) {
     try {
-      // Create worker for persistence operations
-      this.#worker = new Worker(config.workerUrl, { type: 'module' });
-
       // Set up message handler for worker
       const initPromise = new Promise((resolve, reject) => {
         const messageHandler = (event) => {
@@ -115,7 +113,10 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
       // Initialize the worker
       this.#worker.postMessage({
         type: 'init',
-        config: config
+        config: {
+          encryptionPassword: config.encryptionPassword,
+          dbName: this.#dbName,
+        }
       });
 
       return await initPromise;

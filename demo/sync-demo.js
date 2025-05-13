@@ -45,7 +45,9 @@ const searchParams = new URLSearchParams(location.search);
     vfsModule: '../src/examples/SyncMemoryProxyAsyncWorkerVFS.js',
     vfsOptions: { 
       encryptionPassword: searchParams.get('password') || 'abcd123',
-      workerUrl: new URL('../src/examples/EncryptedOPFSWorker.js', import.meta.url).toString()
+      worker: () => {
+        return new Worker(new URL('../src/examples/EncryptedOPFSWorker.js', import.meta.url), { type: 'module' });
+      }
     }
   },
   {
