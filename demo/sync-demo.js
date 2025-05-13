@@ -100,7 +100,7 @@ async function initSQLite() {
     }
 
     // Open the database
-    db = sqlite3.syncOpen(dbName);
+    db = sqlite3.sync_open(dbName);
     const end = performance.now();
     console.log(`SQLite opened ${dbName} in ${(end - start).toFixed(2)} ms`);
 
@@ -118,9 +118,9 @@ async function initSQLite() {
       sqlite3.commit_hook(db, hook.commitHook.bind(hook));
     }
 
-    sqlite3.syncExec(db, 'PRAGMA cache_size=-64000');
-    sqlite3.syncExec(db, 'PRAGMA journal_mode=MEMORY');
-    sqlite3.syncExec(db, 'PRAGMA page_size=4096');
+    sqlite3.sync_exec(db, 'PRAGMA cache_size=-64000');
+    sqlite3.sync_exec(db, 'PRAGMA journal_mode=MEMORY');
+    sqlite3.sync_exec(db, 'PRAGMA page_size=4096');
 
     // Return success
     document.getElementById('output').innerHTML =
@@ -139,9 +139,9 @@ function executeSQL(query) {
     const start = performance.now();
     const results = [];
     
-    for (const stmt of sqlite3.syncStatements(db, query)) {
+    for (const stmt of sqlite3.sync_statements(db, query)) {
       const rows = [];
-      while (sqlite3.syncStep(stmt) === SQLite.SQLITE_ROW) {
+      while (sqlite3.sync_step(stmt) === SQLite.SQLITE_ROW) {
         const row = sqlite3.row(stmt);
         rows.push(row);
       }
@@ -199,7 +199,7 @@ class StatementCache {
 }
 const statementCache = new StatementCache(100, stmt => {
   // release the statement handle
-  sqlite3.syncFinalize(stmt);
+  sqlite3.sync_finalize(stmt);
 });
 
 let statementsPrepared = 0;
@@ -211,10 +211,10 @@ function executeSingleQuery(sql, queryArguments) {
     let stmt = statementCache.get(sql);
     if (stmt) {
       // Reuse the cached statement
-      sqlite3.syncReset(stmt);
+      sqlite3.sync_reset(stmt);
       statementsReused++;
     } else {
-      stmt = sqlite3.syncPrepare(db, sql);
+      stmt = sqlite3.sync_prepare(db, sql);
       statementCache.set(sql, stmt);
       statementsPrepared++;
     }
@@ -226,7 +226,7 @@ function executeSingleQuery(sql, queryArguments) {
 
     let columnNames;
     const rows = [];
-    while (sqlite3.syncStep(stmt) === SQLite.SQLITE_ROW) {
+    while (sqlite3.sync_step(stmt) === SQLite.SQLITE_ROW) {
         const rowData = sqlite3.row(stmt);
         columnNames = columnNames ?? sqlite3.column_names(stmt);
         rows.push(rowData);

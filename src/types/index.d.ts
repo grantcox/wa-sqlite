@@ -345,7 +345,7 @@ declare interface SQLiteAPI {
    * @returns `SQLITE_OK` (throws exception on error)
    */
   close(db): Promise<number>;
-  syncClose(db): number;
+  sync_close(db): number;
 
   /**
    * Call the appropriate `column_*` function based on the column type
@@ -525,7 +525,7 @@ declare interface SQLiteAPI {
     zSQL: string,
     callback?: (row: Array<SQLiteCompatibleType|null>, columns: string[]) => void
   ): Promise<number>;
-  syncExec(
+  sync_exec(
     db: number,
     zSQL: string,
     callback?: (row: Array<SQLiteCompatibleType|null>, columns: string[]) => void
@@ -541,7 +541,7 @@ declare interface SQLiteAPI {
    * @returns Promise resolving to `SQLITE_OK` or error status
    */
   finalize(stmt: number): Promise<number>;
-  syncFinalize(stmt: number): number;
+  sync_finalize(stmt: number): number;
 
   /**
    * Test for autocommit mode
@@ -595,7 +595,7 @@ declare interface SQLiteAPI {
     iFlags?: number,
     zVfs?: string    
   ): Promise<number>;
-  syncOpen(
+  sync_open(
     zFilename: string,
     iFlags?: number,
     zVfs?: string    
@@ -622,7 +622,7 @@ declare interface SQLiteAPI {
    * @returns Promise-wrapped `SQLITE_OK` (rejects on error)
    */
   reset(stmt: number): Promise<number>;
-  syncReset(stmt: number): number;
+  sync_reset(stmt: number): number;
 
   /**
    * Convenience function to call `result_*` based of the type of `value`
@@ -749,8 +749,8 @@ declare interface SQLiteAPI {
    * @param options
    */
   statements(db: number, sql: string, options?: SQLitePrepareOptions): AsyncIterable<number>;
-  syncStatements(db: number, sql: string, options?: SQLitePrepareOptions): Iterable<number>;
-  syncPrepare(db: number, sql: string): number;
+  sync_statements(db: number, sql: string, options?: SQLitePrepareOptions): Iterable<number>;
+  sync_prepare(db: number, sql: string): number;
 
   /**
    * Evaluate an SQL statement
@@ -760,7 +760,7 @@ declare interface SQLiteAPI {
    * (rejects on error)
    */
   step(stmt: number): Promise<number>;
-  syncStep(stmt: number): number;
+  sync_step(stmt: number): number;
 
    /**
    * Register an update hook

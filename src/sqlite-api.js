@@ -260,7 +260,7 @@ export function Factory(Module) {
     };
   })();
 
-  sqlite3.syncClose = (function () {
+  sqlite3.sync_close = (function () {
     const fname = "sqlite3_close";
     const f = Module.cwrap(fname, ...decl("n:n"), { async: false });
     return function (db) {
@@ -443,11 +443,11 @@ export function Factory(Module) {
     return SQLite.SQLITE_OK;
   };
 
-  sqlite3.syncExec = function (db, sql, callback) {
-    const stmts = sqlite3.syncStatements(db, sql, { unscoped: true });
+  sqlite3.sync_exec = function (db, sql, callback) {
+    const stmts = sqlite3.sync_statements(db, sql, { unscoped: true });
     for (const stmt of stmts) {
       let columns;
-      while (sqlite3.syncStep(stmt) === SQLite.SQLITE_ROW) {
+      while (sqlite3.sync_step(stmt) === SQLite.SQLITE_ROW) {
         if (callback) {
           columns = columns ?? sqlite3.column_names(stmt);
           const row = sqlite3.row(stmt);
@@ -456,7 +456,7 @@ export function Factory(Module) {
       }
     }
     for (const stmt of stmts) {
-      sqlite3.syncFinalize(stmt);
+      sqlite3.sync_finalize(stmt);
     }
     return SQLite.SQLITE_OK;
   };
@@ -474,7 +474,7 @@ export function Factory(Module) {
     };
   })();
 
-  sqlite3.syncFinalize = (function () {
+  sqlite3.sync_finalize = (function () {
     const fname = "sqlite3_finalize";
     const f = Module.cwrap(fname, ...decl("n:n"), { async: false });
     return function (stmt) {
@@ -545,7 +545,7 @@ export function Factory(Module) {
     };
   })();
 
-  sqlite3.syncOpen = (function () {
+  sqlite3.sync_open = (function () {
     const fname = "sqlite3_open_v2";
     const f = Module.cwrap(fname, ...decl("snnn:n"), { async: false });
     return function (zFilename, flags, zVfs) {
@@ -581,7 +581,7 @@ export function Factory(Module) {
     };
   })();
 
-  sqlite3.syncReset = (function () {
+  sqlite3.sync_reset = (function () {
     const fname = "sqlite3_reset";
     const f = Module.cwrap(fname, ...decl("n:n"), { async: false });
     return function (stmt) {
@@ -798,7 +798,7 @@ export function Factory(Module) {
     })();
   };
 
-  sqlite3.syncStatements = function* (db, sql, options = {}) {
+  sqlite3.sync_statements = function* (db, sql, options = {}) {
     const prepare = Module.cwrap(
       "sqlite3_prepare_v3",
       "number",
@@ -869,7 +869,7 @@ export function Factory(Module) {
     }
   };
 
-  sqlite3.syncPrepare = (function () {
+  sqlite3.sync_prepare = (function () {
     // Note this function does NOT finalize (cleanup) the statement, the caller must do this
     // when the statement is no longer needed.
 
@@ -924,7 +924,7 @@ export function Factory(Module) {
     };
   })();
 
-  sqlite3.syncStep = (function () {
+  sqlite3.sync_step = (function () {
     const fname = "sqlite3_step";
     const f = Module.cwrap(fname, ...decl("n:n"), { async: false });
     return function (stmt) {
