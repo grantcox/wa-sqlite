@@ -750,6 +750,7 @@ declare interface SQLiteAPI {
    */
   statements(db: number, sql: string, options?: SQLitePrepareOptions): AsyncIterable<number>;
   syncStatements(db: number, sql: string, options?: SQLitePrepareOptions): Iterable<number>;
+  syncPrepare(db: number, sql: string): number;
 
   /**
    * Evaluate an SQL statement

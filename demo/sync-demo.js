@@ -214,11 +214,7 @@ function executeSingleQuery(sql, queryArguments) {
       sqlite3.syncReset(stmt);
       statementsReused++;
     } else {
-      const statements = sqlite3.syncStatements(db, sql, { unscoped: true });
-      // we expect only a single statement in each query
-      const statementsArray = Array.from(statements);
-      stmt = statementsArray[0];
-
+      stmt = sqlite3.syncPrepare(db, sql);
       statementCache.set(sql, stmt);
       statementsPrepared++;
     }

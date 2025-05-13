@@ -869,6 +869,48 @@ export function Factory(Module) {
     }
   };
 
+  sqlite3.syncPrepare = (function () {
+    // Note this function does NOT finalize (cleanup) the statement, the caller must do this
+    // when the statement is no longer needed.
+
+    // we're using prepare_v2 rather than prepare_v3, as we don't need the prepFlags
+    // https://sqlite.org/c3ref/prepare.html
+    const fname = "sqlite3_prepare_v2";
+    const f = Module.cwrap(fname, ...decl("nnnnn:n"));
+    return function (db, sql) {
+      // Encode SQL string to UTF-8.
+      const utf8 = textEncoder.encode(sql);
+
+      // Copy encoded string to WebAssembly memory. The SQLite docs say
+      // zero-termination is a minor optimization so add room for that.
+      // Also add space for the statement handle and SQL tail pointer.
+      const allocSize = utf8.byteLength - (utf8.byteLength % 4) + 12;
+      const pzHead = Module._sqlite3_malloc(allocSize);
+      const pzEnd = pzHead + utf8.byteLength + 1;
+      Module.HEAPU8.set(utf8, pzHead);
+      Module.HEAPU8[pzEnd - 1] = 0;
+
+      // Use extra space for the statement handle and SQL tail pointer.
+      const pStmt = pzHead + allocSize - 8;
+      const pzTail = pzHead + allocSize - 4;
+
+      const rc = f(
+        db,
+        pzHead,
+        pzEnd - pzHead,
+        pStmt,
+        pzTail
+      );
+      if (rc !== SQLite.SQLITE_OK) {
+        check("sqlite3_prepare_v2", rc, db);
+      }
+
+      const stmt = Module.getValue(pStmt, "*");
+      mapStmtToDB.set(stmt, db);
+      return stmt;
+    };
+  })();
+
   sqlite3.step = (function() {
     const fname = 'sqlite3_step';
     const f = Module.cwrap(fname, ...decl('n:n'), { async });
