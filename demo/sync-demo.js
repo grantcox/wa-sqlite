@@ -162,36 +162,81 @@ function executeSQL(query) {
   }
 }
 
-function executeSingleQuery(query) {
-  const sql = query["query"];
-  const multiParams = query["groupedParams"] ?? [query["params"]];
+class StatementCache {
+  constructor(capacity, evictionCallback) {
+    this.capacity = capacity;
+    this.evictionCallback = evictionCallback;
+    this.cache = new Map();
+  }
 
+  // Get value and mark as recently used
+  get(key) {
+    if (!this.cache.has(key)) {
+      return undefined;
+    }
+    
+    // Remove and re-add to make it the most recently used
+    const value = this.cache.get(key);
+    this.cache.delete(key);
+    this.cache.set(key, value);
+    
+    return value;
+  }
+
+  // Add or update an entry
+  set(key, value) {
+    // If key exists, delete it first to update its position
+    if (this.cache.has(key)) {
+      this.cache.delete(key);
+    } else if (this.cache.size >= this.capacity) {
+      // Map.keys().next() gives us the oldest key (least recently used)
+      const oldestKey = this.cache.keys().next().value;
+      this.cache.delete(oldestKey);
+      this.evictionCallback(oldestKey);
+    }
+    this.cache.set(key, value);
+  }
+}
+const statementCache = new StatementCache(100, stmt => {
+  // release the statement handle
+  sqlite3.syncFinalize(stmt);
+});
+
+let statementsPrepared = 0;
+let statementsReused = 0;
+
+function executeSingleQuery(sql, queryArguments) {
   try {
-    const statements = sqlite3.syncStatements(db, sql, { unscoped: true });
-
-    // we expect only a single statement in each query
-    const statementsArray = Array.from(statements);
-    const stmt = statementsArray[0];
-
-    let columnNames;
-    for (const params of multiParams) {
-      if (params) {
-        sqlite3.bind_collection(stmt, params);
-      }
-
-      const rows = [];
-      while (sqlite3.syncStep(stmt) === SQLite.SQLITE_ROW) {
-          const rowData = sqlite3.row(stmt);
-          columnNames = columnNames ?? sqlite3.column_names(stmt);
-          rows.push(rowData);
-      }
-
-      const rowsModified = sqlite3.changes(db);
+    // Check if the statement is already cached
+    let stmt = statementCache.get(sql);
+    if (stmt) {
+      // Reuse the cached statement
       sqlite3.syncReset(stmt);
+      statementsReused++;
+    } else {
+      const statements = sqlite3.syncStatements(db, sql, { unscoped: true });
+      // we expect only a single statement in each query
+      const statementsArray = Array.from(statements);
+      stmt = statementsArray[0];
+
+      statementCache.set(sql, stmt);
+      statementsPrepared++;
+    }
+  
+    // Bind parameters if provided
+    if (queryArguments && queryArguments.length > 0) {
+        sqlite3.bind_collection(stmt, queryArguments);
     }
 
-    // release the statement handle
-    sqlite3.syncFinalize(stmt);
+    let columnNames;
+    const rows = [];
+    while (sqlite3.syncStep(stmt) === SQLite.SQLITE_ROW) {
+        const rowData = sqlite3.row(stmt);
+        columnNames = columnNames ?? sqlite3.column_names(stmt);
+        rows.push(rowData);
+    }
+
+    const rowsModified = sqlite3.changes(db);
   } catch (e) {
     console.error(`Error with SQL statement ${sql}`, e);
     throw e;
@@ -289,7 +334,7 @@ async function runSampleQueries(sampleQueries) {
   }
   const totalDuration = timing[timing.length - 1]["start"] - timing[0]["start"];
 
-  timestamp.textContent = `${(totalDuration - totalSleep).toFixed(1)} msec (${totalDuration.toFixed(1)} total, including ${totalSleep} msec sleep), periods: ${JSON.stringify(periods, null, 2)}`;
+  timestamp.textContent = `${(totalDuration - totalSleep).toFixed(1)} msec (${totalDuration.toFixed(1)} total, including ${totalSleep.toFixed(1)} msec sleep), periods: ${JSON.stringify(periods, null, 2)}\nStatements prepared: ${statementsPrepared}, statements reused: ${statementsReused}`;
 }
 
 async function init() {
