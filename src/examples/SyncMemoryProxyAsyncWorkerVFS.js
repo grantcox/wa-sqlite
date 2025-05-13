@@ -47,6 +47,7 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
 
   // Array of pending operations to track what has changed
   /** @type {Array<PendingWriteOperation>} */ #pendingWrites = [];
+  #pendingWriteCount = 0;
 
   // Interval ID for the periodic write sender
   #writeIntervalId = null;
@@ -168,27 +169,46 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
    * Send any pending operations to the worker
    */
   #sendPendingWrites() {
-    if (this.#pendingWrites.length === 0) {
+    // if (this.#pendingWrites.length === 0) {
+    //   return;
+    // }
+
+    // // Atomically claim the operations to send
+    // const operations = this.#pendingWrites.splice(0);
+    
+    // // Get the current state of the database file
+    // const file = this.mapNameToFile.get(`/${this.#dbName}`);
+    // if (!file || !file.data) {
+    //   return;
+    // }
+    
+    // // Create a copy of the database to send to the worker
+    // const dbCopy = new Uint8Array(file.data.byteLength);
+    // dbCopy.set(new Uint8Array(file.data, 0, file.size));
+    
+    // // Send the entire database along with the operations log
+    // this.#worker.postMessage({
+    //   type: 'writes',
+    //   operations,
+    //   databaseState: dbCopy
+    // }, [dbCopy.buffer]);
+
+    if (this.#pendingWriteCount === 0) {
       return;
     }
-
-    // Atomically claim the operations to send
-    const operations = this.#pendingWrites.splice(0);
-    
     // Get the current state of the database file
     const file = this.mapNameToFile.get(`/${this.#dbName}`);
     if (!file || !file.data) {
       return;
     }
+    this.#pendingWriteCount = 0;
     
     // Create a copy of the database to send to the worker
     const dbCopy = new Uint8Array(file.data.byteLength);
     dbCopy.set(new Uint8Array(file.data, 0, file.size));
-    
-    // Send the entire database along with the operations log
+
     this.#worker.postMessage({
-      type: 'writes',
-      operations,
+      type: 'sync',
       databaseState: dbCopy
     }, [dbCopy.buffer]);
   }
@@ -199,12 +219,13 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
    * @param {Uint8Array} data - The data that was written (only used for length)
    */
   #queueWrite(offset, data) {
+    this.#pendingWriteCount++;
     // Only record the offset and size, no data copying
-    this.#pendingWrites.push({
-      type: 'write',
-      offset,
-      size: data.byteLength
-    });
+    // this.#pendingWrites.push({
+    //   type: 'write',
+    //   offset,
+    //   size: data.byteLength
+    // });
   }
 
   /**
@@ -212,21 +233,23 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
    * @param {number} size - The new size to truncate to
    */
   #queueTruncate(size) {
+    this.#pendingWriteCount++;
     // Add to pending operations array
-    this.#pendingWrites.push({
-      type: 'truncate',
-      size
-    });
+    // this.#pendingWrites.push({
+    //   type: 'truncate',
+    //   size
+    // });
   }
 
   /**
    * Queue a delete operation
    */
   #queueDelete() {
+    this.#pendingWriteCount++;
     // Add to pending operations array
-    this.#pendingWrites.push({
-      type: 'delete'
-    });
+    // this.#pendingWrites.push({
+    //   type: 'delete'
+    // });
   }
 
   /**

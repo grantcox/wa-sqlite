@@ -75,6 +75,9 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
     }
   }
 
+  totalSyncCount = 0;
+  totalSyncDuration = 0;
+
   async sync(newDatabaseState) {
     console.log("EncryptedOPFSWorker | Syncing database state, new state size:", newDatabaseState.byteLength);
 
@@ -82,7 +85,7 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
       console.error("EncryptedOPFSWorker | Cannot sync without valid database state or access handle");
       return;
     }
-    let start = performance.now();
+    const start = performance.now();
 
     const currentData = this.getFileData();
     const sourcePageSize = this.#sourcePageSize;
@@ -143,10 +146,9 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
     // Update the in-memory database state
     this.setFileData(newDatabaseState);
     
+    const pageWriteStart = performance.now();
     // Write all dirty pages
     if (dirtyPages.size > 0) {
-      start = performance.now();
-      
       // Write changed pages
       try {
         const writePages = Array.from(dirtyPages);
@@ -167,8 +169,8 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
         
         // Sync changes to disk
         this.#accessHandle.flush();
-        
         const end = performance.now();
+        
         console.log(`EncryptedOPFSWorker | Sync: Wrote ${dirtyPages.size} pages in ${(end - start).toFixed(1)} ms`);
       } catch (e) {
         console.error(`EncryptedOPFSWorker | Sync failed: ${e.message}`);
@@ -176,6 +178,10 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
     } else {
       console.log(`EncryptedOPFSWorker | Sync: No page changes detected`);
     }
+
+    this.totalSyncCount++;
+    this.totalSyncDuration += (performance.now() - start);
+    console.log(`EncryptedOPFSWorker | Sync completed, total sync count: ${this.totalSyncCount}, total duration: ${this.totalSyncDuration.toFixed(1)} ms`);
   }
 
   /**
@@ -183,6 +189,8 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
    * Uses an append-only approach to ensure atomicity.
    * @param {Array<PendingOperation>} operations - Array of operations to process
    */
+  writeQueueProcessedCount = 0;
+  writeQueueProcessedDuration = 0;
   async processWriteQueue(operations) {
     // If nothing to process, exit early
     if (!operations || operations.length === 0) {
@@ -255,7 +263,10 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
       // In this case, we don't retry old operations - we'll get a new state in the next message
     } finally {
       const end = performance.now();
+      this.writeQueueProcessedCount++;
+      this.writeQueueProcessedDuration += (end - start);
       console.log(`EncryptedOPFSWorker | Wrote ${writtenPageCount} pages in ${(end - start).toFixed(1)} ms`);
+      console.log(`EncryptedOPFSWorker | Processed write queue, total save count: ${this.writeQueueProcessedCount}, total duration: ${this.writeQueueProcessedDuration.toFixed(1)} ms`);
     }
   }
 
