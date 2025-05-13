@@ -235,6 +235,7 @@ async function runSampleQueries(sampleQueries) {
   const timing = [
     {checkpoint: "start", start: performance.now(), sleepTime: 0},
   ];
+  let sleepStart = null;
   let sleepTime = 0;
   let totalSleep = 0;
   const sleepEvery = 500;
@@ -242,8 +243,9 @@ async function runSampleQueries(sampleQueries) {
 
   for (let i = 0; i < sampleQueries.length; i++) {
     if (sampleQueries[i]["checkpoint"]) {
-      sleepTime += (sleepDuration * 3);
+      sleepStart = performance.now();
       await new Promise(resolve => setTimeout(resolve, sleepDuration * 3));
+      sleepTime += (performance.now() - sleepStart);
       
       timing[timing.length - 1]["sleepTime"] = sleepTime;
       totalSleep += sleepTime;
@@ -257,13 +259,15 @@ async function runSampleQueries(sampleQueries) {
 
     const sql = sampleQueries[i]["query"];
     if (sql) {
-      executeSingleQuery(sampleQueries[i]);
+      const params = sampleQueries[i]["params"];
+      executeSingleQuery(sql, params);
     }
 
     // sleep regularly, to permit background tasks to run
     if (i % sleepEvery === 0) {
-      sleepTime += sleepDuration;
+      sleepStart = performance.now();
       await new Promise(resolve => setTimeout(resolve, sleepDuration));
+      sleepTime += (performance.now() - sleepStart);
     }
   }
 
