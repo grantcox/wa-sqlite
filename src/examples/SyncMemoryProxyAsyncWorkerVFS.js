@@ -65,6 +65,10 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
     return vfs;
   }
 
+  get isReadOnly() {
+    return !this.#workerSupportsWrites;
+  }
+
   /**
    * @param {string} name
    * @param {*} module

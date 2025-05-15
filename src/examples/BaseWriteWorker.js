@@ -145,7 +145,7 @@ export class BaseWriteWorker {
           await this._init(msg.config);
           
           // Send initialization complete message, with a copy of the file data
-          const initDataCopy = new Uint8Array(new Uint8Array(this.#fileData));
+          const initDataCopy = new Uint8Array(new Uint8Array(this.fileData));
           self.postMessage({
             type: 'initComplete',
             fileData: initDataCopy,
@@ -215,7 +215,7 @@ export class BaseWriteWorker {
         const message = this.#writeMessageQueue.shift();
 
         // Update the in-memory database state
-        this.#fileData = message.databaseState.buffer;
+        this.fileData = message.databaseState.buffer;
 
         // Call processWriteQueue to allow subclasses to persist changes with all operations
         await this.processWriteQueue(message.operations);
