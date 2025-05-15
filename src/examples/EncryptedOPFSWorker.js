@@ -14,7 +14,7 @@ import { BaseWriteWorker } from './BaseWriteWorker.js';
  */
 class EncryptedOPFSWorker extends BaseWriteWorker {
   // OPFS state
-  #rootDir = null;
+  /** @type {FileSystemDirectoryHandle} */ #rootDir = null;
   #fileName = null;
   
   // Synchronous access handle for OPFS file
@@ -43,7 +43,6 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
   /**
    * Initialize the worker with configuration
    * @param {Object} config Worker configuration
-   * @returns {Promise<ArrayBuffer>} Initial file data
    */
   async init(config) {
     try {
@@ -62,13 +61,9 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
       }
       
       // Initialize OPFS
-      const fileData = await this.#initOpfs();
+      await this.#initOpfs();
       
-      // Set the initial file data in base class
-      this.setFileData(fileData);
-      
-      console.log(`EncryptedOPFSWorker | Loaded initial database file, ${fileData.byteLength} bytes`);
-      return fileData;
+      console.log(`EncryptedOPFSWorker | Loaded initial database file, ${this.fileData?.byteLength} bytes`);
     } catch (e) {
       console.error('EncryptedOPFSWorker | Initialization failed:', e);
       throw e;
@@ -87,7 +82,7 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
     }
     const start = performance.now();
 
-    const currentData = this.getFileData();
+    const currentData = this.fileData;
     const sourcePageSize = this.#sourcePageSize;
     
     // Track dirty pages that need to be written
@@ -144,7 +139,7 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
     console.log(`EncryptedOPFSWorker | Sync compared old and new database, found ${dirtyPages.size} dirty pages in ${(performance.now() - start).toFixed(1)} ms`);
     
     // Update the in-memory database state
-    this.setFileData(newDatabaseState);
+    this.fileData = newDatabaseState;
     
     const pageWriteStart = performance.now();
     // Write all dirty pages
@@ -385,70 +380,68 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
 
   /**
    * Read and parse the page index from the file header
+   * @param {File} encryptedFile - The encrypted file from OPFS
    * @returns {Promise<Map<number, number>>} The page index mapping
    */
-  async #readPageIndex() {
-    try {
-      // Get the file size using the access handle
-      const fileSize = this.#accessHandle.getSize();
-      const versionSize = this.#HEADER_VERSION.length; // 8 bytes
-      const prefixSize = versionSize + this.#IV_SIZE + 4; // 4 bytes for length field
+  async #extractPageIndex(encryptedFile) {
+    // Get the file size using the access handle
+    
+    const fileSize = this.#accessHandle.getSize();
+    const versionSize = this.#HEADER_VERSION.length; // 8 bytes
+    const prefixSize = versionSize + this.#IV_SIZE + 4; // 4 bytes for length field
 
-      // If the file is too small to have a minimal header, return an empty index
-      if (fileSize < prefixSize) {
-        console.log(`EncryptedOPFSWorker | File too small for header: ${fileSize} bytes`);
-        return new Map();
-      }
-
-      // First read just the header prefix to check version and get data length
-      const headerPrefix = new Uint8Array(prefixSize);
-      this.#accessHandle.read(headerPrefix, { at: 0 });
-      let position = 0;
-
-      // 1. Check header version
-      const decoder = new TextDecoder();
-      const version = decoder.decode(headerPrefix.slice(0, versionSize));
-      position += versionSize;
-
-      if (version !== this.#HEADER_VERSION) {
-        console.warn(`EncryptedOPFSWorker | Invalid header version: ${version}`);
-        return new Map();
-      }
-
-      // 2. Extract the IV
-      const iv = headerPrefix.slice(position, position + this.#IV_SIZE);
-      position += this.#IV_SIZE;
-
-      // 3. Get the encrypted data length
-      const dataView = new DataView(headerPrefix.buffer, position, 4);
-      const dataLength = dataView.getUint32(0, true); // true = little-endian
-
-      // Validate the data length to prevent reading garbage
-      if (dataLength <= 0 || dataLength > (this.#HEADER_SIZE - prefixSize)) {
-        console.warn(`EncryptedOPFSWorker | Invalid encrypted data length: ${dataLength}`);
-        return new Map();
-      }
-
-      // 4. Read the encrypted data at the position right after the prefix
-      const encryptedData = new Uint8Array(dataLength);
-      this.#accessHandle.read(encryptedData, { at: prefixSize });
-
-      // Decrypt and parse the header data
-      const decryptedData = await this.#decryptData(encryptedData, iv);
-      const jsonStr = decoder.decode(decryptedData);
-      const indexData = JSON.parse(jsonStr);
-
-      // Update our next append offset and free offsets
-      this.#nextAppendOffset = indexData.nextAppendOffset || this.#HEADER_SIZE;
-      this.#freeOffsets = new Set(indexData.freeOffsets || []);
-
-      // Convert the page index entries to a Map
-      const pageIndex = new Map(indexData.entries);
-      return pageIndex;
-    } catch (e) {
-      console.warn(`EncryptedOPFSWorker | Failed to read page index: ${e.message}`);
+    // If the file is too small to have a minimal header, return an empty index
+    if (fileSize < prefixSize) {
+      console.log(`EncryptedOPFSWorker | File too small for header: ${fileSize} bytes`);
       return new Map();
     }
+
+    // First read just the header prefix to check version and get data length
+    const headerPrefix = new Uint8Array(prefixSize);
+    this.#accessHandle.read(headerPrefix, { at: 0 });
+    let position = 0;
+
+    // 1. Check header version
+    const decoder = new TextDecoder();
+    const version = decoder.decode(headerPrefix.slice(0, versionSize));
+    position += versionSize;
+
+    if (version !== this.#HEADER_VERSION) {
+      console.warn(`EncryptedOPFSWorker | Invalid header version: ${version}`);
+      return new Map();
+    }
+
+    // 2. Extract the IV
+    const iv = headerPrefix.slice(position, position + this.#IV_SIZE);
+    position += this.#IV_SIZE;
+
+    // 3. Get the encrypted data length
+    const dataView = new DataView(headerPrefix.buffer, position, 4);
+    const dataLength = dataView.getUint32(0, true); // true = little-endian
+
+    // Validate the data length to prevent reading garbage
+    if (dataLength <= 0 || dataLength > (this.#HEADER_SIZE - prefixSize)) {
+      console.warn(`EncryptedOPFSWorker | Invalid encrypted data length: ${dataLength}`);
+      return new Map();
+    }
+
+    // 4. Read the encrypted data at the position right after the prefix
+    const encryptedData = new Uint8Array(dataLength);
+    this.#accessHandle.read(encryptedData, { at: prefixSize });
+
+    // Decrypt and parse the header data
+    const decryptedData = await this.#decryptData(encryptedData, iv);
+    const jsonStr = decoder.decode(decryptedData);
+    const indexData = JSON.parse(jsonStr);
+
+    // Update our next append offset and free offsets
+    this.#nextAppendOffset = indexData.nextAppendOffset || this.#HEADER_SIZE;
+    this.#freeOffsets = new Set(indexData.freeOffsets || []);
+
+    // Convert the page index entries to a Map
+    const pageIndex = new Map(indexData.entries);
+    return pageIndex;
+
   }
 
   // --------------------------------------------------------------------------
@@ -461,7 +454,7 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
    * @returns {Promise<number[]>} - Array of physical offsets where each page was written
    */
   async #writePages(pageIndices) {
-    const fileData = this.getFileData();
+    const fileData = this.fileData;
     if (!fileData) {
       throw new Error("Cannot write pages without file data");
     }
@@ -549,87 +542,96 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
       this.#rootDir = await navigator.storage.getDirectory();
       
       // Get file handle
+      console.log("001")
       const fileHandle = await this.#rootDir.getFileHandle(this.#fileName, {
         create: true,
       });
+      const initialEncryptedFile = await fileHandle.getFile();
       
+      // Read the page index from the file
+      console.log("002")
+      this.#pageIndex = await this.#extractPageIndex(initialEncryptedFile);
+
+      // Load existing data from OPFS
+      console.log("003")
+      this.fileData = await this.#decryptFile(initialEncryptedFile);
+
       // Create a synchronous access handle for the file
+      console.log("004")
       this.#accessHandle = await fileHandle.createSyncAccessHandle();
 
-      // Read the page index from the file
-      this.#pageIndex = await this.#readPageIndex();
       
-      // Load existing data from OPFS
-      return await this.#readFileFromOPFS();
     } catch (e) {
-      console.error(`EncryptedOPFSWorker | Failed to initialize OPFS`, e.message, e.stack);
+      if (e instanceof DOMException && e.name === "OperationError") {
+        console.error("EncryptedOPFSWorker | Incorrect encryption key or corrupted data, destroying file and starting fresh");
+        const succeeded = await this.#processDeleteOperation();
+        this.setWritesEnabled(succeeded);
+      } else if (e instanceof DOMException && e.name === "NoModificationAllowedError") {
+        console.error(e)
+        console.warn("EncryptedOPFSWorker | OPFS file is already open in another context, this must be a secondary tab.  This tab will be read-only.");
+        this.setWritesEnabled(false);
+      } else {
+        console.error(`EncryptedOPFSWorker | Failed to initialize OPFS`, e.message, e.stack);
+        this.setWritesEnabled(false);
+      }
+
       return new ArrayBuffer(0);
     }
   }
 
   /**
    * Read the database file from OPFS using the page index
+   * @param {File} encryptedFile - The encrypted file from OPFS
    * @returns {Promise<ArrayBuffer>} - The file content
    */
-  async #readFileFromOPFS() {
-    try {
-      if (!this.#accessHandle) {
-        return new ArrayBuffer(0);
-      }
-      
-      // If no pages in the index, return empty buffer
-      if (this.#pageIndex.size === 0) {
-        console.log(`EncryptedOPFSWorker | Empty database file, returning empty buffer`);
-        return new ArrayBuffer(0);
-      }
-      
-      // Find the highest logical page index
-      const highestPageIndex = Math.max(...this.#pageIndex.keys());
-      
-      // Calculate the size of the decrypted buffer
-      const decryptedSize = (highestPageIndex + 1) * this.#sourcePageSize;
-      const decryptedBuffer = new ArrayBuffer(decryptedSize);
-      const decryptedView = new Uint8Array(decryptedBuffer);
-      
-      // Read and decrypt each page
-      for (const [logicalPageIdx, physicalOffset] of this.#pageIndex.entries()) {
-        try {
-          // Read the encrypted page from its physical location
-          const encryptedPage = new Uint8Array(this.#opfsPageSize);
-          const bytesRead = this.#accessHandle.read(encryptedPage, { at: physicalOffset });
-          
-          if (bytesRead !== this.#opfsPageSize) {
-            console.warn(`EncryptedOPFSWorker | Read less data than expected - only ${bytesRead} bytes from page ${logicalPageIdx} at offset ${physicalOffset}`);
-            continue;
-          }
-          
-          // Extract the IV from the beginning of the page
-          const iv = encryptedPage.slice(0, this.#IV_SIZE);
-          
-          // Extract the encrypted data
-          const encryptedData = encryptedPage.slice(this.#IV_SIZE);
-          
-          // Decrypt the page
-          const decryptedPage = await this.#decryptData(encryptedData, iv);
-          
-          // Copy the decrypted data to the correct logical position
-          const destOffset = logicalPageIdx * this.#sourcePageSize;
-          decryptedView.set(decryptedPage, destOffset);
-        } catch (e) {
-          // If decryption fails, leave this page as zeros
-          console.error(`EncryptedOPFSWorker | Error reading/decrypting page ${logicalPageIdx}:`, e);
-        }
-      }
-      
-      console.log(`EncryptedOPFSWorker | Finished reading file with ${this.#pageIndex.size} pages, produced ${decryptedBuffer.byteLength} bytes of plaintext`);
-      return decryptedBuffer;
-    } catch (e) {
-      console.error("EncryptedOPFSWorker | Error reading file from OPFS:", e);
-      if (e instanceof DOMException && e.name === "OperationError") {
-        console.error("EncryptedOPFSWorker | Incorrect encryption key or corrupted data");
-      }
+  async #decryptFile(encryptedFile) {
+    // If no pages in the index, return empty buffer
+    if (this.#pageIndex.size === 0) {
+      console.log(`EncryptedOPFSWorker | Empty database file, returning empty buffer`);
       return new ArrayBuffer(0);
     }
+    
+    // Find the highest logical page index
+    const highestPageIndex = Math.max(...this.#pageIndex.keys());
+    
+    // Calculate the size of the decrypted buffer
+    const decryptedSize = (highestPageIndex + 1) * this.#sourcePageSize;
+    const decryptedBuffer = new ArrayBuffer(decryptedSize);
+    const decryptedView = new Uint8Array(decryptedBuffer);
+    
+    // Read and decrypt each page
+    for (const [logicalPageIdx, physicalOffset] of this.#pageIndex.entries()) {
+      try {
+        // Read the encrypted page from its physical location
+        const encryptedPage = new Uint8Array(this.#opfsPageSize);
+        const bytesRead = this.#accessHandle.read(encryptedPage, { at: physicalOffset });
+        
+        if (bytesRead !== this.#opfsPageSize) {
+          console.warn(`EncryptedOPFSWorker | Read less data than expected - only ${bytesRead} bytes from page ${logicalPageIdx} at offset ${physicalOffset}`);
+          continue;
+        }
+        
+        // Extract the IV from the beginning of the page
+        const iv = encryptedPage.slice(0, this.#IV_SIZE);
+        
+        // Extract the encrypted data
+        const encryptedData = encryptedPage.slice(this.#IV_SIZE);
+        
+        // Decrypt the page
+        const decryptedPage = await this.#decryptData(encryptedData, iv);
+        
+        // Copy the decrypted data to the correct logical position
+        const destOffset = logicalPageIdx * this.#sourcePageSize;
+        decryptedView.set(decryptedPage, destOffset);
+      } catch (e) {
+        // If decryption fails, leave this page as zeros
+        console.error(`EncryptedOPFSWorker | Error reading/decrypting page ${logicalPageIdx}:`, e);
+        throw e;
+      }
+    }
+    
+    console.log(`EncryptedOPFSWorker | Finished reading file with ${this.#pageIndex.size} pages, produced ${decryptedBuffer.byteLength} bytes of plaintext`);
+    return decryptedBuffer;
   }
 
   /**
@@ -661,8 +663,10 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
       await this.#writePageIndex(this.#pageIndex);
 
       console.log(`EncryptedOPFSWorker | Deleted OPFS file and initialized new one`);
+      return true;
     } catch (e) {
       console.error(`EncryptedOPFSWorker | Failed to delete OPFS file: ${e.message}`);
+      return false;
     }
   }
 

@@ -34,6 +34,7 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
 
   // Worker for handling persistence operations
   /** @type {Worker} */ #worker = null;
+  #workerSupportsWrites = true;
 
   // Track if VFS (and worker) is ready
   /** @type {Promise<boolean>} */ #vfsReady = null;
@@ -93,13 +94,16 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
           if (msg.type === 'initComplete') {
             // Store the initial data buffer for later use when opening the SQLite database
             this.#initialData = msg.fileData.buffer;
+            this.#workerSupportsWrites = msg.writesEnabled;
             this.#worker.removeEventListener('message', messageHandler);
             
             // Set up permanent message handler for ongoing communication
             this.#worker.addEventListener('message', this.#handleWorkerMessage.bind(this));
             
             // Start the interval for sending pending writes
-            this.#startWriteInterval();
+            if (this.#workerSupportsWrites) {
+              this.#startWriteInterval();
+            }
             
             resolve(true);
           } else if (msg.type === 'error') {
@@ -171,7 +175,7 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
    * Send any pending operations to the worker
    */
   #sendPendingWrites() {
-    if (this.#pendingWrites.length === 0) {
+    if (this.#pendingWrites.length === 0 || !this.#workerSupportsWrites) {
       return;
     }
 
@@ -202,6 +206,9 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
    * @param {Uint8Array} data - The data that was written (only used for length)
    */
   #queueWrite(offset, data) {
+    if (!this.#workerSupportsWrites) {
+      return;
+    }
     // Only record the offset and size, no data copying
     this.#pendingWrites.push({
       type: 'write',
@@ -215,6 +222,9 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
    * @param {number} size - The new size to truncate to
    */
   #queueTruncate(size) {
+    if (!this.#workerSupportsWrites) {
+      return;
+    }
     // Add to pending operations array
     this.#pendingWrites.push({
       type: 'truncate',
@@ -226,6 +236,9 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
    * Queue a delete operation
    */
   #queueDelete() {
+    if (!this.#workerSupportsWrites) {
+      return;
+    }
     // Add to pending operations array
     this.#pendingWrites.push({
       type: 'delete'

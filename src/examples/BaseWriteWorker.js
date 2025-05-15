@@ -20,7 +20,10 @@
  */
 
 export class BaseWriteWorker {
-  /** @type {ArrayBuffer} */ #fileData = null;
+  // if we detect this is a secondary tab, we disable writes
+  #writesEnabled = true;
+
+  /** @type {ArrayBuffer} */ fileData = null;
   #initialized = false;
   #encryptionKey = null;
 
@@ -77,20 +80,8 @@ export class BaseWriteWorker {
     throw new Error('sync() must be implemented by subclass');
   }
 
-  /**
-   * Set file data - accessor for subclasses
-   * @param {ArrayBuffer} data New file data
-   */
-  setFileData(data) {
-    this.#fileData = data;
-  }
-
-  /**
-   * Get file data - accessor for subclasses
-   * @returns {ArrayBuffer} Current file data
-   */
-  getFileData() {
-    return this.#fileData;
+  setWritesEnabled(enabled) {
+    this.#writesEnabled = enabled;
   }
 
   /**
@@ -157,7 +148,8 @@ export class BaseWriteWorker {
           const initDataCopy = new Uint8Array(new Uint8Array(this.#fileData));
           self.postMessage({
             type: 'initComplete',
-            fileData: initDataCopy
+            fileData: initDataCopy,
+            writesEnabled: this.#writesEnabled
           }, [initDataCopy.buffer]);
 
         } catch (error) {
@@ -172,13 +164,11 @@ export class BaseWriteWorker {
       case 'writes':
         // Process database state and operations
         if (!this.#initialized) {
-          self.postMessage({
-            type: 'error',
-            message: 'Worker not initialized'
-          });
-          break;
+          throw new Error('Worker not initialized');
         }
-        this.#handleWrites(msg.operations, msg.databaseState);
+        if (this.#writesEnabled) {
+          this.#handleWrites(msg.operations, msg.databaseState);
+        }
         break;
         
       case 'sync':
