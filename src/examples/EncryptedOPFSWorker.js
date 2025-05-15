@@ -260,7 +260,7 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
       }
 
       // Sync changes to disk
-      this.#accessHandle.flush();
+      this.#accessHandle?.flush();
 
     } catch (e) {
       console.error(`EncryptedOPFSWorker | Failed to process operation queue: ${e.message}`);

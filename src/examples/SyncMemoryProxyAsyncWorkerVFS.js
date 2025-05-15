@@ -69,6 +69,32 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
     return !this.#workerSupportsWrites;
   }
 
+  exportDatabase() {
+    // return a copy of the current SQLite database file
+    const file = this.mapNameToFile.get(`/${this.#dbName}`);
+    if (file && file.data) {
+      // create a new ArrayBuffer to hold the copied data
+      const newBuffer = new ArrayBuffer(file.data.byteLength);
+      const sourceView = new Uint8Array(file.data);
+      const newView = new Uint8Array(newBuffer);
+      
+      // Copy all data from original to new buffer
+      newView.set(sourceView);
+      
+      // Return this copied buffer
+      return newBuffer;
+    }
+    return null;
+  }
+
+  destroyDatabase() {
+    console.log("SyncMemoryProxyAsyncWorkerVFS | destroyDatabase");
+    this.#queueDelete();
+    this.#sendPendingWrites();
+    this.mapNameToFile.clear();
+    this.#initialData = null;
+  }
+
   /**
    * @param {string} name
    * @param {*} module
@@ -132,24 +158,6 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
       console.error("SyncMemoryProxyAsyncWorkerVFS | Failed to initialize worker:", e);
       return false;
     }
-  }
-
-  exportDatabase() {
-    // return a copy of the current SQLite database file
-    const file = this.mapNameToFile.get(`/${this.#dbName}`);
-    if (file && file.data) {
-      // create a new ArrayBuffer to hold the copied data
-      const newBuffer = new ArrayBuffer(file.data.byteLength);
-      const sourceView = new Uint8Array(file.data);
-      const newView = new Uint8Array(newBuffer);
-      
-      // Copy all data from original to new buffer
-      newView.set(sourceView);
-      
-      // Return this copied buffer
-      return newBuffer;
-    }
-    return null;
   }
 
   /**

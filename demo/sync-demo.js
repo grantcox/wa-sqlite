@@ -63,6 +63,7 @@ const searchParams = new URLSearchParams(location.search);
 // SQLite instance and database connection
 /** @type {SQLiteAPI} */ let sqlite3;
 let db;
+/** @type {any} */ let vfsInstance;
 
 // Initialize SQLite with the selected VFS
 async function initSQLite() {
@@ -88,8 +89,8 @@ async function initSQLite() {
         ...config.vfsOptions
       };
       const vfsName = searchParams.get('vfsName') ?? config.vfsName ?? 'demo';
-      const vfs = await namespace[className].create(vfsName, module, vfsOptions);
-      sqlite3.vfs_register(vfs, true);
+      vfsInstance = await namespace[className].create(vfsName, module, vfsOptions);
+      sqlite3.vfs_register(vfsInstance, true);
     }
 
     let hook = null;
@@ -366,12 +367,15 @@ async function init() {
   // Initialize SQLite
   const sqliteReady = initSQLite();
 
+  const destroyDbButton = /** @type {HTMLButtonElement} */(document.getElementById('destroy-db'));
+
   // Wait for both editor and SQLite to be ready
   const [editor, sqliteInitialized] = await Promise.all([editorReady, sqliteReady]);
-  
+
   if (sqliteInitialized) {
     executeButton.disabled = false;
     executeFileButton.disabled = false;
+    destroyDbButton.disabled = false;
   }
 
   // Handle file selection
@@ -432,15 +436,45 @@ async function init() {
         output.innerHTML = `<pre>${response.error.message}</pre>`;
       }
     }
-    
+
     executeButton.disabled = false;
     executeFileButton.disabled = false;
+    destroyDbButton.disabled = false;
+  });
+
+  // Add event listener for the Destroy DB button
+  destroyDbButton.addEventListener('click', async function() {
+    if (!vfsInstance || typeof vfsInstance.destroyDatabase !== 'function') {
+      alert('Database destruction not supported with the current VFS configuration');
+      return;
+    }
+
+    if (confirm('Are you sure you want to destroy the database? This action cannot be undone.')) {
+      try {
+        destroyDbButton.disabled = true;
+        executeButton.disabled = true;
+        executeFileButton.disabled = true;
+
+        await vfsInstance.destroyDatabase();
+
+        const timestamp = document.getElementById('timestamp');
+        timestamp.textContent = `${new Date().toLocaleTimeString()} - Database destroyed successfully`;
+      } catch (error) {
+        console.error('Error destroying database:', error);
+        alert(`Failed to destroy database: ${error.message}`);
+      } finally {
+        destroyDbButton.disabled = false;
+        executeButton.disabled = false;
+        executeFileButton.disabled = false;
+      }
+    }
   });
 
   // Execute SQL on button click
   executeButton.addEventListener('click', async function() {
     executeButton.disabled = true;
     executeFileButton.disabled = true;
+    destroyDbButton.disabled = true;
 
     // Get SQL from editor
     const selection = editor.getSelection();
@@ -468,9 +502,10 @@ async function init() {
     } else {
       output.innerHTML = `<pre>${response.error.message}</pre>`;
     }
-    
+
     executeButton.disabled = false;
     executeFileButton.disabled = false;
+    destroyDbButton.disabled = false;
   });
 }
 
