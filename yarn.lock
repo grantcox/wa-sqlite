@@ -302,6 +302,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@sqlite.org/sqlite-wasm@npm:^3.49.2-build1":
+  version: 3.49.2-build1
+  resolution: "@sqlite.org/sqlite-wasm@npm:3.49.2-build1"
+  bin:
+    sqlite-wasm: bin/index.js
+  checksum: 2f370b79f5fce90b700f5cdafc0007b06552f7fc7fd7b543f57a3773d694acebe29980c71b426dd0677abce6bdfd5c877b9120a272a9aefa845423efe05e532d
+  languageName: node
+  linkType: hard
+
 "@tootallnate/once@npm:2":
   version: 2.0.0
   resolution: "@tootallnate/once@npm:2.0.0"
@@ -4245,6 +4254,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "wa-sqlite@workspace:."
   dependencies:
+    "@sqlite.org/sqlite-wasm": "npm:^3.49.2-build1"
     "@types/jasmine": "npm:^5.1.4"
     "@web/dev-server": "npm:^0.4.6"
     "@web/test-runner": "npm:^0.20.0"
