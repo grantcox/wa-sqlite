@@ -95,6 +95,21 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
     this.#initialData = null;
   }
 
+  shutdown() {
+    if (this.#writeIntervalId) {
+      clearInterval(this.#writeIntervalId);
+      this.#writeIntervalId = null;
+    }
+    if (this.#worker) {
+      this.#worker.terminate();
+      this.#worker = null;
+    }
+    this.mapNameToFile.clear();
+    this.mapIdToFile.clear();
+    this.#initialData = null;
+    this.#pendingWrites = [];
+  }
+
   /**
    * @param {string} name
    * @param {*} module
