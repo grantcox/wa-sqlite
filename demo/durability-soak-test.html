@@ -2,7 +2,7 @@
 <html>
   <head>
     <meta charset="UTF-8">
-    <title>wa-sqlite demo</title>
+    <title>wa-sqlite Durability Soak Test</title>
     <style>
       #editor-container {
         width: 100%;
@@ -18,6 +18,22 @@
         flex-direction: column;
         flex-wrap: wrap;
         width: 100%;
+        margin-top: 20px;
+        padding: 10px;
+        background-color: #f9f9f9;
+        border-radius: 5px;
+        border: 1px solid #ddd;
+        min-height: 200px;
+        max-height: 600px;
+        overflow-y: auto;
+      }
+
+      #memory-stats {
+        margin-top: 10px;
+        padding: 10px;
+        background-color: #e9f5e9;
+        border-radius: 5px;
+        border: 1px solid #ccc;
       }
 
       table {
@@ -48,20 +64,90 @@
         font-style: italic;
         color: #666;
       }
+
+      #iframe-container {
+        height: 0;
+        width: 0;
+        overflow: hidden;
+      }
+
+      #soak-test-controls {
+        margin-top: 15px;
+        display: flex;
+        gap: 10px;
+      }
+
+      .stats-container {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 15px;
+      }
+
+      .stats-box {
+        background-color: #f0f0f0;
+        border-radius: 5px;
+        padding: 10px;
+        flex: 1;
+        margin: 0 5px;
+        text-align: center;
+      }
+
+      .stats-box h3 {
+        margin-top: 0;
+        color: #333;
+      }
+
+      .stats-value {
+        font-size: 24px;
+        font-weight: bold;
+        color: #0066cc;
+      }
     </style>
   </head>
   <body>
-    <h1>Synchronous main-process demo</h1>
+    <h1>SQLite VFS Durability Soak Test</h1>
+    <p>
+      This test verifies VFS durability by repeatedly running SQL queries, randomly terminating the worker, 
+      and verifying database integrity after recovery.
+    </p>
 
     <div class="file-upload">
-      <label for="sql-file">Upload File:</label>
+      <label for="sql-file">Upload SQL Queries (JSON):</label>
       <input type="file" id="sql-file" accept=".json">
-      <button id="execute-soak-test" disabled>Start Soak Test</button>
       <div id="sql-file-info"></div>
     </div>
 
+    <div id="soak-test-controls">
+      <button id="execute-soak-test" disabled>Start Soak Test</button>
+      <select id="max-iterations">
+        <option value="10">10 iterations</option>
+        <option value="50">50 iterations</option>
+        <option value="100">100 iterations</option>
+        <option value="500">500 iterations</option>
+        <option value="1000">1000 iterations</option>
+        <option value="5000" selected>5000 iterations</option>
+      </select>
+    </div>
+
+    <div class="stats-container">
+      <div class="stats-box">
+        <h3>Iterations</h3>
+        <div id="iteration-count" class="stats-value">0</div>
+      </div>
+      <div class="stats-box">
+        <h3>Queries Run</h3>
+        <div id="query-count" class="stats-value">0</div>
+      </div>
+      <div class="stats-box">
+        <h3>Memory Usage</h3>
+        <div id="memory-usage" class="stats-value">-</div>
+      </div>
+    </div>
+
     <pre id="timestamp"></pre>
-    <div id="output"></div>
+    <div id="output">Ready to start test...</div>
+    
+    <div id="iframe-container"></div>
 
     <script type="module" src="durability-soak-test.js"></script>
 

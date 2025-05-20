@@ -1,273 +1,199 @@
 // Copyright 2024 Roy T. Hashimoto. All Rights Reserved.
 
-import * as SQLite from '../src/sqlite-api.js';
-import SQLiteESMFactory from '../dist/wa-sqlite.mjs';
-import { SyncMemoryProxyAsyncWorkerVFS } from '../src/examples/SyncMemoryProxyAsyncWorkerVFS.js';
+// Durability soak test main controller
+// This file manages the iframe-based test iterations to ensure proper memory cleanup
 
 const searchParams = new URLSearchParams(location.search);
 
-// SQLite instance and database connection
-/** @type {SQLiteAPI} */ let sqlite3;
-let db;
-/** @type {SyncMemoryProxyAsyncWorkerVFS} */ let vfsInstance;
-/** @type {Worker} */ let worker;
+let selectedFileBlobUrl = null;
 let parsedQueries = [];
-let isTerminated = false;
 let testIterationCount = 0;
-const maxIterationCount = 5000;
-let iterationQueriesRun = 0;
+let maxIterationCount = 5000;
 let totalQueriesRun = 0;
+let currentTestRunning = false;
+let testStartTime = 0;
 
-
+// UI Elements
 const output = document.getElementById('output');
+const timestamp = document.getElementById('timestamp');
+const iterationCountElement = document.getElementById('iteration-count');
+const queryCountElement = document.getElementById('query-count');
+const memoryUsageElement = document.getElementById('memory-usage');
+const iframeContainer = document.getElementById('iframe-container');
 
-// Initialize SQLite with the selected VFS
-async function initSQLite() {
-  try {
-    let dbName = searchParams.get('dbName') ?? 'hello';
-
-    // Instantiate SQLite
-    const start = performance.now();
-    const module = await SQLiteESMFactory();
-    sqlite3 = SQLite.Factory(module);
-
-    worker = new Worker(new URL('../src/examples/EncryptedOPFSWorker.js', import.meta.url), { type: 'module' });
-    vfsInstance = await SyncMemoryProxyAsyncWorkerVFS.create("demo", module, {
-      dbName,
-      syncLatencyMsec: 25,
-      encryptionPassword: searchParams.get('password') || 'abcd123',
-      worker: worker,
-    })
-    sqlite3.vfs_register(vfsInstance, true);
-
-    // Open the database
-    db = sqlite3.sync_open(dbName);
-    const end = performance.now();
-    console.log(`SQLite opened ${dbName} in ${(end - start).toFixed(2)} ms`);
-
-    sqlite3.sync_exec(db, 'PRAGMA cache_size=-64000');
-    sqlite3.sync_exec(db, 'PRAGMA journal_mode=MEMORY');
-    sqlite3.sync_exec(db, 'PRAGMA page_size=4096');
-    sqlite3.sync_exec(db, 'PRAGMA legacy_alter_table=ON');
-
-    // Return success
-    document.getElementById('output').innerHTML =
-      JSON.stringify([...new URLSearchParams(location.search).entries()]);
-    return true;
-  } catch (e) {
-    console.error(e);
-    document.getElementById('output').innerHTML = `<pre>${cvtErrorToCloneable(e).stack}</pre>`;
-    return false;
-  }
-}
-
-async function runSoakTest() {
-  isTerminated = false;
-  totalQueriesRun += iterationQueriesRun;
-  iterationQueriesRun = 0;
-
-  if (testIterationCount > maxIterationCount) {
-    output.innerHTML = `Soak test successfully completed after ${maxIterationCount} iterations, ${totalQueriesRun} queries.`;
+/**
+ * Starts a new iteration of the soak test in an iframe
+ */
+async function runSoakTestIteration() {
+  if (currentTestRunning || testIterationCount >= maxIterationCount) {
     return;
   }
-  testIterationCount++;
-  output.innerHTML = `Running soak test iteration ${testIterationCount}...`;
-  output.innerHTML += `${totalQueriesRun} queries have run so far.`;
-
-  // blow everything up after a random delay
-  const randomDelay = 200 + Math.floor(Math.random() * 5000);
-  setTimeout(async () => {
-    output.innerHTML = `Soak test ${testIterationCount} interrupted after ${randomDelay}ms (${iterationQueriesRun} queries), terminating...`;
-    interruptTest();
-
-    const passed = await checkIntegrity();
-    if (passed) {
-      output.innerHTML += `<br/>Integrity check passed.`;
-
-      // destroy and recreate the database
-      destroyDatabase();
-      await initSQLite()
-
-      setTimeout(() => {
-        runSoakTest();
-      }, 100);
-    }
-    else {
-      output.innerHTML += `<br/>Integrity check failed, not continuing.`;
-    }
-  }, randomDelay);
-
-  runSampleQueries(parsedQueries);
-}
-
-function interruptTest() {
-  isTerminated = true;
-  if (worker) {
-    worker.terminate();
-    worker = null;
-  }
-  if (vfsInstance) {
-    vfsInstance.shutdown();
-    vfsInstance = null;
-  }
-  if (db) {
-    try {
-      sqlite3.sync_close(db);
-    } catch (e) {
-      console.error('Error closing database', e);
-    }
-    db = null;
-  }
-  sqlite3 = null;
-}
-
-async function checkIntegrity() {
-  // now reload it all, and confirm there is something in the database
-  output.innerHTML += '<br/>Reloading SQLite...';
-  await initSQLite()
-
-  output.innerHTML += '<br/>Reloaded, checking integrity.';
-  const tableSizes = {};
-  const tableResult = executeSingleQuery(`SELECT name FROM sqlite_master WHERE type='table'`)
-  for (const row of tableResult.rows) {
-    const tableName = row[0];
-    const rowCount = executeSingleQuery(`SELECT COUNT(*) FROM ${tableName}`);
-    tableSizes[tableName] = rowCount.rows[0][0];
-  }
-  output.innerHTML += `<br/>Tables are:<pre>${JSON.stringify(tableSizes, null, 2)}</pre>`;
-
-  const integrityCheck = executeSingleQuery(`PRAGMA integrity_check`);
-  const integrityCheckPassed = integrityCheck.rows.length === 1 && integrityCheck.rows[0][0] === 'ok';
-  if (integrityCheckPassed) {
-    output.innerHTML += `<br/>Integrity check: OK`;
-  } else {
-    output.innerHTML += `<br/>Integrity check: <pre>${JSON.stringify(integrityCheck.rows, null, 2)}</pre>`;
-    return false;
-  }
-
-  return tableResult.rows.length > 0 && integrityCheckPassed;
-}
-
-async function destroyDatabase() {
-  vfsInstance.destroyDatabase();
-  interruptTest();
-}
-
-function executeSingleQuery(sql, queryArguments) {
-  try {
-    iterationQueriesRun++;
-    const stmt = sqlite3.sync_prepare(db, sql);
   
-    // Bind parameters if provided
-    if (queryArguments && queryArguments.length > 0) {
-        sqlite3.bind_collection(stmt, queryArguments);
+  currentTestRunning = true;
+  testIterationCount++;
+  
+  // Create query parameter string for the iframe (without the large queries)
+  const dbName = searchParams.get('dbName') ?? 'hello';
+  const password = searchParams.get('password') || 'abcd123';
+  
+  const params = new URLSearchParams({
+    dbName,
+    password,
+    iteration: testIterationCount,
+    maxIterations: maxIterationCount,
+    totalQueries: totalQueriesRun
+  });
+  
+  // Update UI
+  output.innerHTML += `<div>Running soak test iteration ${testIterationCount}...</div>`;
+  output.scrollTop = output.scrollHeight;
+  
+  // Update statistics
+  iterationCountElement.textContent = testIterationCount.toString();
+  queryCountElement.textContent = totalQueriesRun.toString();
+  updateMemoryUsage();
+  
+  // Create and load iframe
+  const iframe = document.createElement('iframe');
+  iframe.style.width = '0';
+  iframe.style.height = '0';
+  iframe.style.border = 'none';
+  
+  // Create a promise for when the iframe completes
+  const iframeComplete = new Promise((resolve) => {
+    window.addEventListener('message', function onMessage(event) {
+      if (event.data.type === 'iterationComplete' && event.data.iteration === testIterationCount) {
+        window.removeEventListener('message', onMessage);
+        resolve(event.data);
+      } else if (event.data.type === 'integrityCheck') {
+        // Update UI with integrity check results
+        if (event.data.passed) {
+          output.innerHTML += `<div>Integrity check passed for iteration ${event.data.iteration}.</div>`;
+          if (event.data.tableSizes) {
+            const tableCount = Object.keys(event.data.tableSizes).length;
+            output.innerHTML += `<div>Tables found: ${tableCount}</div>`;
+          }
+        } else {
+          output.innerHTML += `<div style="color: red">Integrity check FAILED: <pre>${JSON.stringify(event.data.integrityResult, null, 2)}</pre></div>`;
+        }
+        output.scrollTop = output.scrollHeight;
+      }
+    });
+  });
+  
+  // Create a reference to the iframe for later messaging
+  const iframeId = `iframe-${testIterationCount}`;
+  iframe.id = iframeId;
+  
+  // Set up a message listener for when the iframe is ready to receive queries
+  window.addEventListener('message', function onIframeReady(event) {
+    if (event.data.type === 'iframeReady' && event.data.iteration === testIterationCount) {
+      // Remove this specific event listener once it's fired
+      window.removeEventListener('message', onIframeReady);
+      
+      // share a reference to the query file so the iframe can load it
+      
+      if (selectedFileBlobUrl) {
+        iframe.contentWindow.postMessage({
+          type: 'queryFileReference',
+          fileName: selectedFileBlobUrl
+        }, '*');
+      } else {
+        console.error('No blob URL available for file reference');
+        iframe.contentWindow.postMessage({
+          type: 'queries',
+          queries: [] // Empty array as fallback
+        }, '*');
+      }
     }
-
-    let columnNames;
-    const rows = [];
-    while (sqlite3.sync_step(stmt) === SQLite.SQLITE_ROW) {
-        const rowData = sqlite3.row(stmt);
-        columnNames = columnNames ?? sqlite3.column_names(stmt);
-        rows.push(rowData);
-    }
-
-    const rowsModified = sqlite3.changes(db);
-
-    return {
-      rows,
-      columnNames,
-      rowsModified,
-    }
-  } catch (e) {
-    console.error(`Error with SQL statement ${sql}`, e);
-    if (isTerminated) {
-      // ignore this, we know we're doing a hard shutdown
-      return;
-    }
-    throw e;
+  });
+  
+  // Load the iframe
+  iframe.src = `durability-soak-test-runner.html?${params.toString()}`;
+  iframeContainer.appendChild(iframe);
+  
+  // Wait for iteration to complete
+  const result = await iframeComplete;
+  
+  // Handle iteration results
+  if (result.passed) {
+    totalQueriesRun += result.queriesRun;
+    queryCountElement.textContent = totalQueriesRun.toString();
+    
+    // Calculate and display time metrics 
+    const elapsedSeconds = Math.floor((Date.now() - testStartTime) / 1000);
+    const queriesPerSecond = totalQueriesRun / elapsedSeconds;
+    
+    output.innerHTML += `<div>Iteration ${testIterationCount} completed. (${result.queriesRun} queries, ${queriesPerSecond.toFixed(1)} q/s)</div>`;
+    output.scrollTop = output.scrollHeight;
+    
+    // Remove iframe after a short delay to ensure proper cleanup
+    setTimeout(() => {
+      iframeContainer.removeChild(iframe);
+      
+      // Force garbage collection if available
+      if (window.gc) {
+        window.gc();
+      }
+      
+      updateMemoryUsage();
+      
+      // Continue with next iteration if not at max
+      currentTestRunning = false;
+      if (testIterationCount < maxIterationCount) {
+        setTimeout(() => {
+          runSoakTestIteration();
+        }, 100);
+      } else {
+        output.innerHTML += `<div><strong>Soak test successfully completed after ${maxIterationCount} iterations, ${totalQueriesRun} queries.</strong></div>`;
+        output.scrollTop = output.scrollHeight;
+        document.getElementById('execute-soak-test').disabled = false;
+      }
+    }, 500);
+  } else {
+    output.innerHTML += `<div style="color: red"><strong>Iteration ${testIterationCount} failed, stopping test.</strong></div>`;
+    output.scrollTop = output.scrollHeight;
+    
+    // Keep the iframe around for debugging if it failed
+    currentTestRunning = false;
+    document.getElementById('execute-soak-test').disabled = false;
   }
 }
 
 /**
- * Run a series of sample queries from a JSON file
- * @param {Array} sampleQueries - Array of query objects with query and optional params
+ * Update the memory usage display
  */
-async function runSampleQueries(sampleQueries) {
-  const timestamp = document.getElementById('timestamp');
-  timestamp.textContent = new Date().toLocaleTimeString();
-  const timing = [
-    {checkpoint: "start", start: performance.now(), sleepTime: 0},
-  ];
-  let sleepStart = null;
-  let sleepTime = 0;
-  let totalSleep = 0;
-  const sleepEvery = 500;
-  const sleepDuration = 30;
-
-  for (let i = 0; i < sampleQueries.length; i++) {
-    if (isTerminated) {
-      return;
-    }
-    if (sampleQueries[i]["checkpoint"]) {
-      sleepStart = performance.now();
-      await new Promise(resolve => setTimeout(resolve, sleepDuration * 3));
-      sleepTime += (performance.now() - sleepStart);
-      
-      timing[timing.length - 1]["sleepTime"] = sleepTime;
-      totalSleep += sleepTime;
-      sleepTime = 0;
-      timing.push({
-        checkpoint: sampleQueries[i]["checkpoint"], 
-        start: performance.now(), 
-        sleepTime: 0
-      });
-    }
-
-    const sql = sampleQueries[i]["query"];
-    if (sql) {
-      const params = sampleQueries[i]["params"];
-      executeSingleQuery(sql, params);
-    }
-
-    // sleep regularly, to permit background tasks to run
-    if (i % sleepEvery === 0) {
-      sleepStart = performance.now();
-      await new Promise(resolve => setTimeout(resolve, sleepDuration));
-      sleepTime += (performance.now() - sleepStart);
-    }
+function updateMemoryUsage() {
+  if (window.performance && window.performance.memory) {
+    const memoryInfo = window.performance.memory;
+    const usedHeapSize = memoryInfo.usedJSHeapSize / (1024 * 1024);
+    const totalHeapSize = memoryInfo.totalJSHeapSize / (1024 * 1024);
+    memoryUsageElement.textContent = `${usedHeapSize.toFixed(1)} / ${totalHeapSize.toFixed(1)} MB`;
+  } else {
+    memoryUsageElement.textContent = 'Not available';
   }
-
-  timing[timing.length - 1]["sleepTime"] = sleepTime;
-  totalSleep += sleepTime;
-  timing.push({
-    checkpoint: "end", 
-    start: performance.now(), 
-    sleepTime: 0
-  });
-
-  const periods = {};
-  for (let i = 0; i < timing.length - 1; i++) {
-    const name = timing[i]["checkpoint"];
-    const start = timing[i]["start"];
-    const end = timing[i + 1]["start"];
-    const duration = end - start - timing[i]["sleepTime"];
-    periods[name] = `${duration.toFixed(1)}ms`;
-  }
-  const totalDuration = timing[timing.length - 1]["start"] - timing[0]["start"];
-
-  timestamp.textContent = `${(totalDuration - totalSleep).toFixed(1)} msec (${totalDuration.toFixed(1)} total, including ${totalSleep.toFixed(1)} msec sleep), periods: ${JSON.stringify(periods, null, 2)}\nStatements prepared: ${statementsPrepared}, statements reused: ${statementsReused}`;
 }
 
+/**
+ * Initialize the application
+ */
 async function init() {
   const executeTestButton = /** @type {HTMLButtonElement} */(document.getElementById('execute-soak-test'));
   const fileInput = /** @type {HTMLInputElement} */(document.getElementById('sql-file'));
   const fileInfo = document.getElementById('sql-file-info');
+  const maxIterationsSelect = /** @type {HTMLSelectElement} */(document.getElementById('max-iterations'));
   
-  // Initialize SQLite
+  // Reset if requested
   await maybeReset(searchParams);
-  await initSQLite();
-  executeTestButton.disabled = true;
-
+  
+  // Set up iteration selection
+  maxIterationsSelect.addEventListener('change', function() {
+    maxIterationCount = parseInt(maxIterationsSelect.value, 10);
+  });
+  
+  // Create a blob URL for direct file access if needed
+  let selectedFileBlob = null;
+  
   // Handle file selection
   fileInput.addEventListener('change', async function() {
     if (fileInput.files && fileInput.files.length > 0) {
@@ -275,30 +201,71 @@ async function init() {
       fileInfo.textContent = `Selected: ${file.name} (${formatFileSize(file.size)})`;
 
       try {
+        // Get the file content
         const fileContent = await file.text();
-        parsedQueries = JSON.parse(fileContent);
-        if (parsedQueries.length > 0) {
-          fileInfo.textContent = `${fileInfo.textContent}, ${parsedQueries.length} queries`;
-          executeTestButton.disabled = false;
+        // Create a blob for sharing with the iframe
+        selectedFileBlob = new Blob([fileContent], { type: 'application/json' });
+        
+        // Revoke any existing blob URL
+        if (selectedFileBlobUrl) {
+          URL.revokeObjectURL(selectedFileBlobUrl);
         }
+        
+        // Create a blob URL
+        selectedFileBlobUrl = URL.createObjectURL(selectedFileBlob);
+      
+        executeTestButton.disabled = false;
       } catch (e) {
         output.innerHTML = `<pre>Error parsing JSON: ${e.message}</pre>`;
       }
-
     } else {
       fileInfo.textContent = '';
+      
+      // Revoke blob URL if it exists
+      if (selectedFileBlobUrl) {
+        URL.revokeObjectURL(selectedFileBlobUrl);
+        selectedFileBlobUrl = null;
+      }
+      
+      selectedFileBlob = null;
     }
   });
 
-  // Start soak test file on button click
+  // Start soak test on button click
   executeTestButton.addEventListener('click', async function() {
-    executeTestButton.disabled = true;
-
-    output.innerHTML = 'Running soak test...';
-    runSoakTest();
+    if (!selectedFileBlobUrl) {
+      output.innerHTML = '<div>No queries loaded. Please select a JSON file with SQL queries.</div>';
+      return;
+    }
     
-    executeTestButton.disabled = false;
+    executeTestButton.disabled = true;
+    
+    // Reset counters
+    testIterationCount = 0;
+    totalQueriesRun = 0;
+    testStartTime = Date.now();
+    
+    // Update UI
+    output.innerHTML = '<div>Starting soak test...</div>';
+    iterationCountElement.textContent = '0';
+    queryCountElement.textContent = '0';
+    updateMemoryUsage();
+    
+    // Start the first iteration after a short delay
+    setTimeout(() => {
+      runSoakTestIteration();
+    }, 100);
   });
+  
+  // Clean up resources when the page is unloaded
+  window.addEventListener('beforeunload', () => {
+    if (selectedFileBlobUrl) {
+      URL.revokeObjectURL(selectedFileBlobUrl);
+    }
+  });
+  
+  // Set up periodic memory usage updates
+  setInterval(updateMemoryUsage, 2000);
 }
 
 // Helper function to format file size
@@ -312,6 +279,9 @@ function formatFileSize(bytes) {
   }
 }
 
+/**
+ * Reset OPFS and IndexedDB if requested
+ */
 async function maybeReset(searchParams) {
   if (searchParams.has('reset')) {
     console.log('clearing OPFS and IndexedDB');
@@ -339,30 +309,8 @@ async function maybeReset(searchParams) {
   }
 }
 
-function cvtErrorToCloneable(e) {
-  if (e instanceof Error) {
-    const props = new Set([
-      ...['name', 'message', 'stack'].filter(k => e[k] !== undefined),
-      ...Object.getOwnPropertyNames(e)
-    ]);
-    return Object.fromEntries(Array.from(props, k => [k, e[k]])
-      .filter(([_, v]) => {
-        // Skip any non-cloneable properties
-        try {
-          structuredClone(v);
-          return true;
-        } catch (e) {
-          return false;
-        }
-      }));
-  }
-  return e;
-}
-
 if (document.readyState !== 'loading') {
   init();
 } else {
-  document.addEventListener('DOMContentLoaded', function () {
-      init();
-  });
+  document.addEventListener('DOMContentLoaded', init);
 }
