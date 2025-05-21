@@ -1,7 +1,7 @@
 // Copyright 2024 Roy T. Hashimoto. All Rights Reserved.
 import * as SQLite from '../src/sqlite-constants.js';
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
-import { SqliteWasmMemoryVFS } from './SqliteWasmMemoryVFS.js';
+import { initMemoryVfs } from './SqliteWasmMemoryVFS.js';
 
 // This is the path to the Monaco editor distribution. For development
 // this loads from the local server (uses Yarn 2 path).
@@ -78,113 +78,14 @@ async function initSQLite() {
       print: log,
       printErr: error,
     });
+    const memoryVfs = initMemoryVfs(sqlite3);
 
-    if (config.vfsModule) {
-      // Create the VFS and register it as the default file system
-      // const namespace = await import(config.vfsModule);
-      // const className = config.vfsClassName ?? config.vfsModule.match(/([^/]+)\.js$/)[1];
-      // const vfsOptions = {
-      //   dbName,
-      //   ...config.vfsOptions
-      // };
-      // const vfsName = searchParams.get('vfsName') ?? config.vfsName ?? 'demo';
-      // vfsInstance = await namespace[className].create(vfsName, sqlite3, vfsOptions);
-          
-      // const vfsStruct = new sqlite3.capi.sqlite3_vfs();
-      // vfsStruct.$iVersion = 1;
-      // vfsStruct.$szOsFile = 32;
-      // vfsStruct.$mxPathname = 1024;
-      // vfsStruct.$zName = sqlite3.wasm.allocCString("demo", false);
-
-      // const ioStruct = new sqlite3.capi.sqlite3_io_methods();
-      // ioStruct.iVersion = 1;
-
-      // const demoVFS = new SqliteWasmMemoryVFS();
-
-      // // Install the VFS with both structs and methods
-      // sqlite3.vfs.installVfs({
-      //   // vfs: {
-      //   //   struct: vfsStruct,
-      //   //   methods: demoVFS,
-      //   //   asDefault: true,
-      //   // },
-      //   io: {
-      //     struct: ioStruct,
-      //     methods: demoVFS,
-      //   }
-      // });
-
-      const ioMethods = {
-        xCheckReservedLock: function (pFile, pOut) {
-          console.log('xCheckReservedLock');
-          return 0;
-        },
-        xClose: function (pFile) {
-          console.log('xClose');
-          return 0;
-        },
-        xDeviceCharacteristics: function (pFile) {
-          console.log('xDeviceCharacteristics');
-          return sqlite3.capi.SQLITE_IOCAP_UNDELETABLE_WHEN_OPEN;
-        },
-        xFileControl: function (pFile, opId, pArg) {
-          console.log('xFileControl', opId, pArg);
-          return sqlite3.capi.SQLITE_NOTFOUND;
-        },
-        xFileSize: function (pFile, pSz64) {
-          console.log('xFileSize');
-          return 0;
-        },
-        xLock: function (pFile, lockType) {
-          console.log('xLock', lockType);
-          return 0;
-        },
-        xRead: function (pFile, pDest, n, offset64) {
-          console.log('xRead', n, offset64);
-          return sqlite3.capi.SQLITE_IOERR_SHORT_READ;
-        },
-        xSectorSize: function (pFile) {
-          console.log('xSectorSize');
-          return 4096;
-        },
-        xSync: function (pFile, flags) {
-          console.log('xSync', flags);
-          return 0;
-        },
-        xTruncate: function (pFile, sz64) {
-          console.log('xTruncate', sz64);
-          return 0;
-        },
-        xUnlock: function (pFile, lockType) {
-          console.log('xUnlock', lockType);
-          return 0;
-        },
-        xWrite: function (pFile, pSrc, n, offset64) {
-          console.log('xWrite', n, offset64);
-          return 0;
-        },
-      };
-
-      const installedIoMethods = new sqlite3.capi.sqlite3_io_methods();
-      installedIoMethods.iVersion = 1;
-      sqlite3.vfs.installVfs({
-        io: { struct: installedIoMethods, methods: ioMethods },
-      });
-      
-      // log(`VFS ${className} registered as default`);
-    }
-
-    // let hook = null;
-    // if (config.hookOptions) {
-    //   hook = new AsyncWorkerCommitHook(sqlite3, module, config.hookOptions);
-    //   // wait for the hook to be ready (load existing data from OPFS)
-    //   await hook.isReady();
-    //   // when using this hook, we always use an in-memory database
-    //   dbName = ":memory:";
-    // }
 
     // Open the database
-    db = new sqlite3.oo1.DB(dbName, 'ct');
+    db = new sqlite3.oo1.DB({
+      filename: dbName,
+      vfs: memoryVfs.name
+    });
     const end = performance.now();
     console.log(`SQLite opened ${dbName} in ${(end - start).toFixed(2)} ms`);
 

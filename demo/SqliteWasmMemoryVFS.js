@@ -1,909 +1,414 @@
-// Copyright 2024 Roy T. Hashimoto. All Rights Reserved.
-import * as VFS from '../src/sqlite-constants.js';
+/**
+ * sqlite-wasm-memory-vfs.js
+ * 
+ * A SQLite VFS for sqlite-wasm that uses in-memory ArrayBuffers for storage.
+ * This can be imported as an ES module.
+ */
 
-const DEFAULT_SECTOR_SIZE = 512;
-
-
-// Base class for a VFS.
-class Base {
-  name;
-  mxPathname = 64;
-  _module;
-
-  /**
-   * @param {string} name 
-   * @param {object} module 
-   */
-  constructor(name, module) {
-    this.name = name;
-    this._module = module;
-  }
-
-  /**
-   * @returns {void} 
-   */
-  close() {
-  }
-
-  /**
-   * @param {number} pVfs 
-   * @param {number} zName 
-   * @param {number} pFile 
-   * @param {number} flags 
-   * @param {number} pOutFlags 
-   * @returns {number}
-   */
-  xOpen(pVfs, zName, pFile, flags, pOutFlags) {
-    return VFS.SQLITE_CANTOPEN;
-  }
-
-  /**
-   * @param {number} pVfs 
-   * @param {number} zName 
-   * @param {number} syncDir 
-   * @returns {number}
-   */
-  xDelete(pVfs, zName, syncDir) {
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} pVfs 
-   * @param {number} zName 
-   * @param {number} flags 
-   * @param {number} pResOut 
-   * @returns {number}
-   */
-  xAccess(pVfs, zName, flags, pResOut) {
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} pVfs 
-   * @param {number} zName 
-   * @param {number} nOut 
-   * @param {number} zOut 
-   * @returns {number}
-   */
-  xFullPathname(pVfs, zName, nOut, zOut) {
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} pVfs 
-   * @param {number} nBuf 
-   * @param {number} zBuf 
-   * @returns {number}
-   */
-  xGetLastError(pVfs, nBuf, zBuf) {
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} pFile 
-   * @returns {number}
-   */
-  xClose(pFile) {
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {number} pData 
-   * @param {number} iAmt 
-   * @param {number} iOffset 
-   * @returns {number}
-   */
-  xRead(pFile, pData, iAmt, iOffset) {
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {number} pData 
-   * @param {number} iAmt 
-   * @param {number} iOffset 
-   * @returns {number}
-   */
-  xWrite(pFile, pData, iAmt, iOffset) {
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {number} size 
-   * @returns {number}
-   */
-  xTruncate(pFile, size) {
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {number} flags 
-   * @returns {number}
-   */
-  xSync(pFile, flags) {
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * 
-   * @param {number} pFile 
-   * @param {number} pSize 
-   * @returns {number}
-   */
-  xFileSize(pFile, pSize) {
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {number} lockType 
-   * @returns {number}
-   */
-  xLock(pFile, lockType) {
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {number} lockType 
-   * @returns {number}
-   */
-  xUnlock(pFile, lockType) {
-    return VFS.SQLITE_OK;
-  } 
-
-  /**
-   * @param {number} pFile 
-   * @param {number} pResOut 
-   * @returns {number}
-   */
-  xCheckReservedLock(pFile, pResOut) {
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {number} op 
-   * @param {number} pArg 
-   * @returns {number}
-   */
-  xFileControl(pFile, op, pArg) {
-    return VFS.SQLITE_NOTFOUND;
-  }
-
-  /**
-   * @param {number} pFile 
-   * @returns {number}
-   */
-  xSectorSize(pFile) {
-    return DEFAULT_SECTOR_SIZE;
-  }
-
-  /**
-   * @param {number} pFile 
-   * @returns {number}
-   */
-  xDeviceCharacteristics(pFile) {
-    return 0;
-  }
-}
-
-export const FILE_TYPE_MASK = [
-  VFS.SQLITE_OPEN_MAIN_DB,
-  VFS.SQLITE_OPEN_MAIN_JOURNAL,
-  VFS.SQLITE_OPEN_TEMP_DB,
-  VFS.SQLITE_OPEN_TEMP_JOURNAL,
-  VFS.SQLITE_OPEN_TRANSIENT_DB,
-  VFS.SQLITE_OPEN_SUBJOURNAL,
-  VFS.SQLITE_OPEN_SUPER_JOURNAL,
-  VFS.SQLITE_OPEN_WAL
-].reduce((mask, element) => mask | element);
-
-
-// Convenience base class for a JavaScript VFS.
-// The raw xOpen, xRead, etc. function signatures receive only C primitives
-// which aren't easy to work with. This class provides corresponding calls
-// like jOpen, jRead, etc., which receive JavaScript-friendlier arguments
-// such as string, Uint8Array, and DataView.
-class FacadeVFS extends Base {
-  /**
-   * @param {string} name 
-   * @param {object} module 
-   */
-  constructor(name, module) {
-    super(name, module);
+/**
+ * Creates and registers a memory-based VFS for sqlite-wasm
+ * 
+ * @param {Object} sqlite3 - The sqlite3 module from sqlite-wasm
+ * @param {string} [vfsName='memory'] - Optional name for the VFS (defaults to 'memory')
+ * @returns {Object} VFS controller with utility methods
+ */
+export function createMemoryVfs(sqlite3, vfsName = 'memory') {
+  if (!sqlite3 || !sqlite3.capi || !sqlite3.wasm) {
+    throw new Error("sqlite3 argument is required and must have capi and wasm properties.");
   }
   
-  /**
-   * Return the filename for a file id for use by mixins.
-   * @param {number} pFile 
-   * @returns {string}
-   */
-  getFilename(pFile) {
-    throw new Error('unimplemented');
-  }
+  const capi = sqlite3.capi;
+  const wasm = sqlite3.wasm;
+  
+  // Create VFS and IO Methods structures
+  const memoryIoMethods = new capi.sqlite3_io_methods();
+  const memoryVfs = new capi.sqlite3_vfs();
+  
+  // Store open files, keyed by file ID (sqlite3_file pointer)
+  const openFiles = Object.create(null);
+  
+  // Store file data, keyed by filename
+  const fileStorage = new Map();
 
-  /**
-   * @param {string?} filename 
-   * @param {number} pFile 
-   * @param {number} flags 
-   * @param {DataView} pOutFlags 
-   * @returns {number}
-   */
-  jOpen(filename, pFile, flags, pOutFlags) {
-    return VFS.SQLITE_CANTOPEN;
-  }
+  // VFS configuration
+  memoryVfs.$iVersion = 2;
+  memoryVfs.$szOsFile = capi.sqlite3_file.structInfo.sizeof;
+  memoryVfs.$mxPathname = 1024;
+  memoryVfs.$zName = wasm.allocCString(vfsName);
+  
+  // Set to null since we don't need dynamic library support
+  memoryVfs.$xDlOpen = memoryVfs.$xDlError = memoryVfs.$xDlSym = memoryVfs.$xDlClose = null;
 
-  /**
-   * @param {string} filename 
-   * @param {number} syncDir 
-   * @returns {number}
-   */
-  jDelete(filename, syncDir) {
-    return VFS.SQLITE_OK;
-  }
+  // Clean up resources when disposing
+  memoryVfs.addOnDispose('$zName', memoryVfs.$zName);
+  memoryIoMethods.$iVersion = 1;
 
-  /**
-   * @param {string} filename 
-   * @param {number} flags 
-   * @param {DataView} pResOut 
-   * @returns {number}
-   */
-  jAccess(filename, flags, pResOut) {
-    return VFS.SQLITE_OK;
-  }
+  // Helper to generate a random filename if none is specified
+  const randomFilename = function() {
+    return 'memory-' + Math.random().toString(36).slice(2);
+  };
 
-  /**
-   * @param {string} filename 
-   * @param {Uint8Array} zOut 
-   * @returns {number}
-   */
-  jFullPathname(filename, zOut) {
-    // Copy the filename to the output buffer.
-    const { read, written } = new TextEncoder().encodeInto(filename, zOut);
-    if (read < filename.length) return VFS.SQLITE_IOERR;
-    if (written >= zOut.length) return VFS.SQLITE_IOERR;
-    zOut[written] = 0;
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {Uint8Array} zBuf 
-   * @returns {number}
-   */
-  jGetLastError(zBuf) {
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} pFile 
-   * @returns {number}
-   */
-  jClose(pFile) {
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {Uint8Array} pData 
-   * @param {number} iOffset 
-   * @returns {number}
-   */
-  jRead(pFile, pData, iOffset) {
-    pData.fill(0);
-    return VFS.SQLITE_IOERR_SHORT_READ;
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {Uint8Array} pData 
-   * @param {number} iOffset 
-   * @returns {number}
-   */
-  jWrite(pFile, pData, iOffset) {
-    return VFS.SQLITE_IOERR_WRITE;
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {number} size 
-   * @returns {number}
-   */
-  jTruncate(pFile, size) {
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {number} flags 
-   * @returns {number}
-   */
-  jSync(pFile, flags) {
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {DataView} pSize
-   * @returns {number}
-   */
-  jFileSize(pFile, pSize) {
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {number} lockType 
-   * @returns {number}
-   */
-  jLock(pFile, lockType) {
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {number} lockType 
-   * @returns {number}
-   */
-  jUnlock(pFile, lockType) {
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {DataView} pResOut 
-   * @returns {number}
-   */
-  jCheckReservedLock(pFile, pResOut) {
-    pResOut.setInt32(0, 0, true);
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} pFile
-   * @param {number} op
-   * @param {DataView} pArg
-   * @returns {number}
-   */
-  jFileControl(pFile, op, pArg) {
-    return VFS.SQLITE_NOTFOUND;
-  }
-
-  /**
-   * @param {number} pFile
-   * @returns {number}
-   */
-  jSectorSize(pFile) {
-    return super.xSectorSize(pFile);
-  }
-
-  /**
-   * @param {number} pFile
-   * @returns {number}
-   */
-  jDeviceCharacteristics(pFile) {
-    return 0;
-  }
-
-  /**
-   * @param {number} pVfs 
-   * @param {number} zName 
-   * @param {number} pFile 
-   * @param {number} flags 
-   * @param {number} pOutFlags 
-   * @returns {number}
-   */
-  xOpen(pVfs, zName, pFile, flags, pOutFlags) {
-    const filename = this.#decodeFilename(zName, flags);
-    const pOutFlagsView = this.#makeTypedDataView('Int32', pOutFlags);
-    this['log']?.('jOpen', filename, pFile, '0x' + flags.toString(16));
-    return this.jOpen(filename, pFile, flags, pOutFlagsView);
-  }
-
-  /**
-   * @param {number} pVfs 
-   * @param {number} zName 
-   * @param {number} syncDir 
-   * @returns {number}
-   */
-  xDelete(pVfs, zName, syncDir) {
-    const filename = this.UTF8ToString(zName);
-    this['log']?.('jDelete', filename, syncDir);
-    return this.jDelete(filename, syncDir);
-  }
-
-  /**
-   * @param {number} pVfs 
-   * @param {number} zName 
-   * @param {number} flags 
-   * @param {number} pResOut 
-   * @returns {number}
-   */
-  xAccess(pVfs, zName, flags, pResOut) {
-    const filename = this.UTF8ToString(zName);
-    const pResOutView = this.#makeTypedDataView('Int32', pResOut);
-    this['log']?.('jAccess', filename, flags);
-    return this.jAccess(filename, flags, pResOutView);
-  }
-
-  /**
-   * @param {number} pVfs 
-   * @param {number} zName 
-   * @param {number} nOut 
-   * @param {number} zOut 
-   * @returns {number}
-   */
-  xFullPathname(pVfs, zName, nOut, zOut) {
-    const filename = this.UTF8ToString(zName);
-    const zOutArray = this._module.HEAPU8.subarray(zOut, zOut + nOut);
-    this['log']?.('jFullPathname', filename, nOut);
-    return this.jFullPathname(filename, zOutArray);
-  }
-
-  /**
-   * @param {number} pVfs 
-   * @param {number} nBuf 
-   * @param {number} zBuf 
-   * @returns {number}
-   */
-  xGetLastError(pVfs, nBuf, zBuf) {
-    const zBufArray = this._module.HEAPU8.subarray(zBuf, zBuf + nBuf);
-    this['log']?.('jGetLastError', nBuf);
-    return this.jGetLastError(zBufArray);
-  }
-
-  /**
-   * @param {number} pFile 
-   * @returns {number}
-   */
-  xClose(pFile) {
-    this['log']?.('jClose', pFile);
-    return this.jClose(pFile);
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {number} pData 
-   * @param {number} iAmt 
-   * @param {number} iOffset 
-   * @returns {number}
-   */
-  xRead(pFile, pData, iAmt, iOffset) {
-    const pDataArray = this.makeDataArray(pData, iAmt);
-    this['log']?.('jRead', pFile, iAmt, iOffset);
-    return this.jRead(pFile, pDataArray, iOffset);
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {number} pData 
-   * @param {number} iAmt 
-   * @param {number} iOffset 
-   * @returns {number}
-   */
-  xWrite(pFile, pData, iAmt, iOffset) {
-    const pDataArray = this.makeDataArray(pData, iAmt);
-    this['log']?.('jWrite', pFile, pDataArray, iOffset);
-    return this.jWrite(pFile, pDataArray, iOffset);
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {number} size 
-   * @returns {number}
-   */
-  xTruncate(pFile, size) {
-    this['log']?.('jTruncate', pFile, size);
-    return this.jTruncate(pFile, size);
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {number} flags 
-   * @returns {number}
-   */
-  xSync(pFile, flags) {
-    this['log']?.('jSync', pFile, flags);
-    return this.jSync(pFile, flags);
-  }
-
-  /**
-   * 
-   * @param {number} pFile 
-   * @param {number} pSize 
-   * @returns {number}
-   */
-  xFileSize(pFile, pSize) {
-    const pSizeView = this.#makeTypedDataView('BigInt64', pSize);
-    this['log']?.('jFileSize', pFile);
-    return this.jFileSize(pFile, pSizeView);
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {number} lockType 
-   * @returns {number}
-   */
-  xLock(pFile, lockType) {
-    this['log']?.('jLock', pFile, lockType);
-    return this.jLock(pFile, lockType);
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {number} lockType 
-   * @returns {number}
-   */
-  xUnlock(pFile, lockType) {
-    this['log']?.('jUnlock', pFile, lockType);
-    return this.jUnlock(pFile, lockType);
-  } 
-
-  /**
-   * @param {number} pFile 
-   * @param {number} pResOut 
-   * @returns {number}
-   */
-  xCheckReservedLock(pFile, pResOut) {
-    const pResOutView = this.#makeTypedDataView('Int32', pResOut);
-    this['log']?.('jCheckReservedLock', pFile);
-    return this.jCheckReservedLock(pFile, pResOutView);
-  }
-
-  /**
-   * @param {number} pFile 
-   * @param {number} op 
-   * @param {number} pArg 
-   * @returns {number}
-   */
-  xFileControl(pFile, op, pArg) {
-    const pArgView = new DataView(
-      this._module.HEAPU8.buffer,
-      this._module.HEAPU8.byteOffset + pArg);
-    this['log']?.('jFileControl', pFile, op, pArgView);
-    return this.jFileControl(pFile, op, pArgView);
-  }
-
-  /**
-   * @param {number} pFile 
-   * @returns {number}
-   */
-  xSectorSize(pFile) {
-    this['log']?.('jSectorSize', pFile);
-    return this.jSectorSize(pFile);
-  }
-
-  /**
-   * @param {number} pFile 
-   * @returns {number}
-   */
-  xDeviceCharacteristics(pFile) {
-    this['log']?.('jDeviceCharacteristics', pFile);
-    return this.jDeviceCharacteristics(pFile);
-  }
-
-  /**
-   * Wrapped DataView for pointer arguments.
-   * Pointers to a single value are passed using DataView. A Proxy
-   * wrapper prevents use of incorrect type or endianness.
-   * @param {'Int32'|'BigInt64'} type 
-   * @param {number} byteOffset 
-   * @returns {DataView}
-   */
-  #makeTypedDataView(type, byteOffset) {
-    const byteLength = type === 'Int32' ? 4 : 8;
-    const getter = `get${type}`;
-    const setter = `set${type}`;
-    const makeDataView = () => new DataView(
-      this._module.HEAPU8.buffer,
-      this._module.HEAPU8.byteOffset + byteOffset,
-      byteLength);
-    let dataView = makeDataView();
-    return new Proxy(dataView, {
-      get(_, prop) {
-        if (dataView.buffer.byteLength === 0) {
-          // WebAssembly memory resize detached the buffer.
-          dataView = makeDataView();
-        }
-        if (prop === getter) {
-          return function(byteOffset, littleEndian) {
-            if (!littleEndian) throw new Error('must be little endian');
-            return dataView[prop](byteOffset, littleEndian);
-          }
-        }
-        if (prop === setter) {
-          return function(byteOffset, value, littleEndian) {
-            if (!littleEndian) throw new Error('must be little endian');
-            return dataView[prop](byteOffset, value, littleEndian);
-          }
-        }
-        if (typeof prop === 'string' && (prop.match(/^(get)|(set)/))) {
-          throw new Error('invalid type');
-        }
-        const result = dataView[prop];
-        return typeof result === 'function' ? result.bind(dataView) : result;
+  // IO Method implementations
+  const ioMethods = {
+    xClose: function(pFile) {
+      const f = openFiles[pFile];
+      if (f) {
+        delete openFiles[pFile];
+        if (f.sq3File) f.sq3File.dispose();
       }
-    });
-  }
-
-  /**
-   * @param {number} byteOffset 
-   * @param {number} byteLength 
-   */
-  makeDataArray(byteOffset, byteLength) {
-    let target = this._module.HEAPU8.subarray(byteOffset, byteOffset + byteLength);
-    return new Proxy(target, {
-      get: (_, prop, receiver) => {
-        if (target.buffer.byteLength === 0) {
-          // WebAssembly memory resize detached the buffer.
-          target = this._module.HEAPU8.subarray(byteOffset, byteOffset + byteLength);
+      return 0;
+    },
+    
+    xRead: function(pFile, pDest, nBytes, offset64) {
+      console.log('SqliteWasmMemoryVFS.xRead called with', {pFile, pDest, nBytes, offset64});
+      const f = openFiles[pFile];
+      if (!f) return capi.SQLITE_IOERR_READ;
+      
+      try {
+        const fileData = fileStorage.get(f.filename);
+        if (!fileData) return capi.SQLITE_IOERR_READ;
+        
+        const offset = Number(offset64);
+        const available = Math.max(0, fileData.byteLength - offset);
+        const bytesToRead = Math.min(nBytes, available);
+        
+        if (bytesToRead < nBytes) {
+          // Fill remaining space with zeros
+          wasm.heap8u().fill(0, pDest, pDest + nBytes);
         }
-        const result = target[prop];
-        return typeof result === 'function' ? result.bind(target) : result;
+        
+        if (bytesToRead > 0) {
+          // Copy data from our storage to the destination
+          const srcView = new Uint8Array(fileData, offset, bytesToRead);
+          wasm.heap8u().set(srcView, pDest);
+        }
+        
+        return bytesToRead < nBytes ? capi.SQLITE_IOERR_SHORT_READ : 0;
+      } catch (e) {
+        console.error('xRead error:', e);
+        return capi.SQLITE_IOERR_READ;
       }
-    });
-  }
-
-  #decodeFilename(zName, flags) {
-    if (flags & VFS.SQLITE_OPEN_URI) {
-      // The first null-terminated string is the URI path. Subsequent
-      // strings are query parameter keys and values.
-      // https://www.sqlite.org/c3ref/open.html#urifilenamesinsqlite3open
-      let pName = zName;
-      let state = 1;
-      const charCodes = [];
-      while (state) {
-        const charCode = this._module.HEAPU8[pName++];
-        if (charCode) {
-          charCodes.push(charCode);
-        } else {
-          if (!this._module.HEAPU8[pName]) state = null;
-          switch (state) {
-            case 1: // path
-              charCodes.push('?'.charCodeAt(0));
-              state = 2;
-              break;
-            case 2: // key
-              charCodes.push('='.charCodeAt(0));
-              state = 3;
-              break;
-            case 3: // value
-              charCodes.push('&'.charCodeAt(0));
-              state = 2;
-              break;
+    },
+    
+    xWrite: function(pFile, pSrc, nBytes, offset64) {
+      console.log('SqliteWasmMemoryVFS.xWrite called with', {pFile, pSrc, nBytes, offset64});
+      const f = openFiles[pFile];
+      if (!f) return capi.SQLITE_IOERR_WRITE;
+      
+      try {
+        const offset = Number(offset64);
+        let fileData = fileStorage.get(f.filename);
+        const requiredSize = offset + nBytes;
+        
+        // Resize the ArrayBuffer if needed
+        if (!fileData || fileData.byteLength < requiredSize) {
+          // Create a new, larger buffer
+          const newSize = Math.max(requiredSize, fileData ? fileData.byteLength * 2 : 8192);
+          const newBuffer = new ArrayBuffer(newSize);
+          const newView = new Uint8Array(newBuffer);
+          
+          // Copy existing data if any
+          if (fileData) {
+            newView.set(new Uint8Array(fileData));
           }
+          
+          fileData = newBuffer;
+          fileStorage.set(f.filename, fileData);
         }
+        
+        // Copy data from the source to our storage
+        const destView = new Uint8Array(fileData, offset, nBytes);
+        destView.set(wasm.heap8u().subarray(pSrc, pSrc + nBytes));
+        
+        return 0;
+      } catch (e) {
+        console.error('xWrite error:', e);
+        return capi.SQLITE_IOERR_WRITE;
       }
-      return  new TextDecoder().decode(new Uint8Array(charCodes));
+    },
+    
+    xTruncate: function(pFile, size64) {
+      const f = openFiles[pFile];
+      if (!f) return capi.SQLITE_IOERR;
+      
+      try {
+        const size = Number(size64);
+        const fileData = fileStorage.get(f.filename);
+        
+        if (fileData) {
+          // If requested size is smaller than current, create a smaller buffer
+          if (size < fileData.byteLength) {
+            const newBuffer = new ArrayBuffer(size);
+            new Uint8Array(newBuffer).set(new Uint8Array(fileData, 0, size));
+            fileStorage.set(f.filename, newBuffer);
+          }
+          // If larger, we don't need to do anything as xWrite will handle expansion
+        }
+        
+        return 0;
+      } catch (e) {
+        console.error('xTruncate error:', e);
+        return capi.SQLITE_IOERR;
+      }
+    },
+    
+    xSync: function(pFile, flags) {
+      // No-op for memory VFS
+      return 0;
+    },
+    
+    xFileSize: function(pFile, pSize64) {
+      const f = openFiles[pFile];
+      if (!f) return capi.SQLITE_IOERR;
+      
+      try {
+        const fileData = fileStorage.get(f.filename);
+        const size = fileData ? fileData.byteLength : 0;
+        wasm.poke(pSize64, size, 'i64');
+        return 0;
+      } catch (e) {
+        console.error('xFileSize error:', e);
+        return capi.SQLITE_IOERR;
+      }
+    },
+    
+    xLock: function(pFile, lockType) {
+      const f = openFiles[pFile];
+      if (f) f.lockType = lockType;
+      return 0;
+    },
+    
+    xUnlock: function(pFile, lockType) {
+      const f = openFiles[pFile];
+      if (f) f.lockType = lockType;
+      return 0;
+    },
+    
+    xCheckReservedLock: function(pFile, pOut) {
+      wasm.poke(pOut, 0, 'i32');
+      return 0;
+    },
+    
+    xFileControl: function(pFile, op, pArg) {
+      return capi.SQLITE_NOTFOUND;
+    },
+    
+    xDeviceCharacteristics: function(pFile) {
+      // Memory storage supports atomic and sequential writes
+      return capi.SQLITE_IOCAP_ATOMIC | capi.SQLITE_IOCAP_SEQUENTIAL;
+    },
+    
+    xSectorSize: function(pFile) {
+      return 512; // Standard sector size
     }
-    return zName ? this.UTF8ToString(zName) : null;
-  }
+  };
 
-  UTF8ToString(ptr, maxBytesToRead) {
-    return ptr ? UTF8ArrayToString(HEAPU8, ptr, maxBytesToRead) : "";
+  // VFS method implementations
+  const vfsMethods = {
+    xOpen: function(pVfs, zName, pFile, flags, pOutFlags) {
+      console.log('SQLiteWasmMemoryVFS | xOpen called with', {zName});
+      try {
+        // Parse filename from the C string
+        let filename = zName ? wasm.cstrToJs(zName) : randomFilename();
+        
+        // Create a file handle object
+        const fh = Object.create(null);
+        fh.fid = pFile;
+        fh.filename = filename;
+        fh.flags = flags;
+        fh.lockType = capi.SQLITE_LOCK_NONE;
+        fh.readOnly = !(flags & capi.SQLITE_OPEN_CREATE) && !!(flags & capi.SQLITE_OPEN_READONLY);
+        
+        // If file doesn't exist but we're asked to create it
+        if (!fileStorage.has(filename) && (flags & capi.SQLITE_OPEN_CREATE)) {
+          fileStorage.set(filename, new ArrayBuffer(0));
+        }
+        
+        // If file doesn't exist and we're not creating, return error
+        if (!fileStorage.has(filename)) {
+          return capi.SQLITE_CANTOPEN;
+        }
+        
+        // Store the file handle
+        openFiles[pFile] = fh;
+        
+        // Set up the sqlite3_file structure
+        fh.sq3File = new capi.sqlite3_file(pFile);
+        fh.sq3File.$pMethods = memoryIoMethods.pointer;
+        
+        // Update out flags if read-only
+        if (fh.readOnly) {
+          wasm.poke(pOutFlags, capi.SQLITE_OPEN_READONLY, 'i32');
+        }
+        
+        return 0;
+      } catch (e) {
+        console.error('xOpen error:', e);
+        return capi.SQLITE_CANTOPEN;
+      }
+    },
+    
+    xDelete: function(pVfs, zName, syncDir) {
+      try {
+        const filename = wasm.cstrToJs(zName);
+        const result = fileStorage.delete(filename);
+        return result ? 0 : capi.SQLITE_IOERR_DELETE;
+      } catch (e) {
+        console.error('xDelete error:', e);
+        return capi.SQLITE_IOERR_DELETE;
+      }
+    },
+    
+    xAccess: function(pVfs, zName, flags, pOut) {
+      try {
+        const filename = wasm.cstrToJs(zName);
+        const exists = fileStorage.has(filename);
+        wasm.poke(pOut, exists ? 1 : 0, 'i32');
+        return 0;
+      } catch (e) {
+        console.error('xAccess error:', e);
+        wasm.poke(pOut, 0, 'i32');
+        return 0;
+      }
+    },
+    
+    xFullPathname: function(pVfs, zName, nOut, pOut) {
+      try {
+        // Just copy the name as-is for our simple VFS
+        const i = wasm.cstrncpy(pOut, zName, nOut);
+        return i < nOut ? 0 : capi.SQLITE_CANTOPEN;
+      } catch (e) {
+        console.error('xFullPathname error:', e);
+        return capi.SQLITE_CANTOPEN;
+      }
+    },
+    
+    xCurrentTime: function(pVfs, pOut) {
+      // Return Julian day with fractional part for the time of day
+      wasm.poke(pOut, 2440587.5 + new Date().getTime() / 86400000, 'double');
+      return 0;
+    },
+    
+    xCurrentTimeInt64: function(pVfs, pOut) {
+      // Return time in milliseconds since Julian epoch
+      wasm.poke(pOut, 2440587.5 * 86400000 + new Date().getTime(), 'i64');
+      return 0;
+    },
+    
+    xRandomness: function(pVfs, nOut, pOut) {
+      // Fill the output buffer with random bytes
+      const heap = wasm.heap8u();
+      let i = 0;
+      for (; i < nOut; ++i) {
+        heap[pOut + i] = (Math.random() * 255) & 0xff;
+      }
+      return i;
+    },
+    
+    xSleep: function(pVfs, microseconds) {
+      // No-op for now; could implement with a busy-wait
+      return 0;
+    },
+    
+    xGetLastError: function(pVfs, nOut, pOut) {
+      // No error mechanism for this simple implementation
+      return 0;
+    }
+  };
+
+  // Register the VFS with SQLite
+  sqlite3.vfs.installVfs({
+    io: { struct: memoryIoMethods, methods: ioMethods },
+    vfs: { struct: memoryVfs, methods: vfsMethods }
+  });
+  
+  // Add a convenience DB constructor if OO1 API is available
+  if (sqlite3.oo1) {
+    const MemoryDb = function(...args) {
+      const opt = sqlite3.oo1.DB.dbCtorHelper.normalizeArgs(...args);
+      opt.vfs = vfsName;
+      sqlite3.oo1.DB.dbCtorHelper.call(this, opt);
+    };
+    MemoryDb.prototype = Object.create(sqlite3.oo1.DB.prototype);
+    sqlite3.oo1.MemoryDb = MemoryDb;
   }
+  
+  // Return the VFS controller object with utility methods
+  return {
+    vfs: memoryVfs,
+    name: vfsName,
+    
+    /**
+     * Clears all storage in the memory VFS
+     */
+    clearStorage: function() {
+      fileStorage.clear();
+    },
+    
+    /**
+     * Gets file data as ArrayBuffer
+     * 
+     * @param {string} filename - The name of the file to retrieve
+     * @returns {ArrayBuffer|undefined} - The file data or undefined if not found
+     */
+    getFileData: function(filename) {
+      return fileStorage.get(filename);
+    },
+    
+    /**
+     * Lists all files currently in storage
+     * 
+     * @returns {string[]} - Array of filenames
+     */
+    listFiles: function() {
+      return [...fileStorage.keys()];
+    },
+    
+    /**
+     * Sets file data from ArrayBuffer
+     * 
+     * @param {string} filename - The name of the file to create or update
+     * @param {ArrayBuffer} data - The data to store
+     */
+    setFileData: function(filename, data) {
+      if (!(data instanceof ArrayBuffer)) {
+        throw new Error("Data must be an ArrayBuffer");
+      }
+      fileStorage.set(filename, data.slice(0)); // Use slice to clone the buffer
+    },
+    
+    /**
+     * Imports a database from an ArrayBuffer
+     * 
+     * @param {string} filename - The name to give the database file
+     * @param {ArrayBuffer} buffer - The database content as an ArrayBuffer
+     */
+    importDb: function(filename, buffer) {
+      this.setFileData(filename, buffer);
+    },
+    
+    /**
+     * Exports a database as an ArrayBuffer
+     * 
+     * @param {string} filename - The name of the database file
+     * @returns {ArrayBuffer|null} - The database content or null if not found
+     */
+    exportDb: function(filename) {
+      const buffer = this.getFileData(filename);
+      return buffer ? buffer.slice(0) : null; // Return a copy
+    }
+  };
 }
 
-// Emscripten "legalizes" 64-bit integer arguments by passing them as
-// two 32-bit signed integers.
-function delegalize(lo32, hi32) {
-  return (hi32 * 0x100000000) + lo32 + (lo32 < 0 ? 2**32 : 0);
+/**
+ * This is a convenience wrapper that initializes and registers the memory VFS.
+ * 
+ * @param {Object} sqlite3 - The sqlite3 module from sqlite-wasm
+ * @param {Object} options - Configuration options
+ * @param {string} [options.name='memory'] - Name for the VFS
+ * @returns {Object} - The VFS controller
+ */
+export function initMemoryVfs(sqlite3, options = {}) {
+  const name = options.name || 'memory';
+  return createMemoryVfs(sqlite3, name);
 }
-
-
-// Sample in-memory filesystem.
-export class SqliteWasmMemoryVFS extends FacadeVFS {
-  // Map of existing files, keyed by filename.
-  mapNameToFile = new Map();
-
-  // Map of open files, keyed by id (sqlite3_file pointer).
-  mapIdToFile = new Map();
-
-  constructor(name, module) {
-    super(name, module);
-  }
-
-  close() {
-    for (const fileId of this.mapIdToFile.keys()) {
-      this.jClose(fileId);
-    }
-  }
-
-  /**
-   * @param {string?} filename 
-   * @param {number} fileId 
-   * @param {number} flags 
-   * @param {DataView} pOutFlags 
-   * @returns {number}
-   */
-  jOpen(filename, fileId, flags, pOutFlags) {
-    const url = new URL(filename || Math.random().toString(36).slice(2), 'file://');
-    const pathname = url.pathname;
-
-    let file = this.mapNameToFile.get(pathname);
-    if (!file) {
-      if (flags & VFS.SQLITE_OPEN_CREATE) {
-        // Create a new file object.
-        file = {
-          pathname,
-          flags,
-          size: 0,
-          data: new ArrayBuffer(0)
-        };
-        this.mapNameToFile.set(pathname, file);
-      } else {
-        return VFS.SQLITE_CANTOPEN;
-      }
-    }
-
-    // Put the file in the opened files map.
-    this.mapIdToFile.set(fileId, file);
-    pOutFlags.setInt32(0, flags, true);
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} fileId 
-   * @returns {number}
-   */
-  jClose(fileId) {
-    const file = this.mapIdToFile.get(fileId);
-    this.mapIdToFile.delete(fileId);
-
-    if (file.flags & VFS.SQLITE_OPEN_DELETEONCLOSE) {
-      this.mapNameToFile.delete(file.pathname);
-    }
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} fileId 
-   * @param {Uint8Array} pData 
-   * @param {number} iOffset
-   * @returns {number}
-   */
-  jRead(fileId, pData, iOffset) {
-    const file = this.mapIdToFile.get(fileId);
-
-    // Clip the requested read to the file boundary.
-    const bgn = Math.min(iOffset, file.size);
-    const end = Math.min(iOffset + pData.byteLength, file.size);
-    const nBytes = end - bgn;
-
-    if (nBytes) {
-      pData.set(new Uint8Array(file.data, bgn, nBytes));
-    }
-
-    if (nBytes < pData.byteLength) {
-      // Zero unused area of read buffer.
-      pData.fill(0, nBytes);
-      return VFS.SQLITE_IOERR_SHORT_READ;
-    }
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} fileId 
-   * @param {Uint8Array} pData 
-   * @param {number} iOffset
-   * @returns {number}
-   */
-  jWrite(fileId, pData, iOffset) {
-    const file = this.mapIdToFile.get(fileId);
-    if (iOffset + pData.byteLength > file.data.byteLength) {
-      // Resize the ArrayBuffer to hold more data.
-      const newSize = Math.max(iOffset + pData.byteLength, 2 * file.data.byteLength);
-      const data = new ArrayBuffer(newSize);
-      new Uint8Array(data).set(new Uint8Array(file.data, 0, file.size));
-      file.data = data;
-    }
-
-    // Copy data.
-    new Uint8Array(file.data, iOffset, pData.byteLength).set(pData);
-    file.size = Math.max(file.size, iOffset + pData.byteLength);
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} fileId 
-   * @param {number} iSize 
-   * @returns {number}
-   */
-  jTruncate(fileId, iSize) {
-    const file = this.mapIdToFile.get(fileId);
-
-    // For simplicity we don't make the ArrayBuffer smaller.
-    file.size = Math.min(file.size, iSize);
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {number} fileId 
-   * @param {DataView} pSize64 
-   * @returns {number}
-   */
-  jFileSize(fileId, pSize64) {
-    const file = this.mapIdToFile.get(fileId);
-
-    pSize64.setBigInt64(0, BigInt(file.size), true);
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {string} name 
-   * @param {number} syncDir 
-   * @returns {number}
-   */
-  jDelete(name, syncDir) {
-    const url = new URL(name, 'file://');
-    const pathname = url.pathname;
-
-    this.mapNameToFile.delete(pathname);
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * @param {string} name 
-   * @param {number} flags 
-   * @param {DataView} pResOut 
-   * @returns {number}
-   */
-  jAccess(name, flags, pResOut) {
-    const url = new URL(name, 'file://');
-    const pathname = url.pathname;
-
-    const file = this.mapNameToFile.get(pathname);
-    pResOut.setInt32(0, file ? 1 : 0, true);
-    return VFS.SQLITE_OK;
-  }
-
-  /**
-   * Override the base makeDataArray to not watch for WebAssembly memory resize.
-   * as we always use the memory immediately.
-   * @param {number} byteOffset 
-   * @param {number} byteLength 
-   */
-  makeDataArray(byteOffset, byteLength) {
-    return this._module.HEAPU8.subarray(byteOffset, byteOffset + byteLength);
-  }
-}
-
-
-var UTF8Decoder = typeof TextDecoder != "undefined" ? new TextDecoder("utf8") : undefined;
-var UTF8ArrayToString = (heapOrArray, idx, maxBytesToRead) => {
-    var endIdx = idx + maxBytesToRead;
-    var endPtr = idx;
-    while (heapOrArray[endPtr] && !(endPtr >= endIdx)) ++endPtr;
-    if (endPtr - idx > 16 && heapOrArray.buffer && UTF8Decoder) {
-        return UTF8Decoder.decode(heapOrArray.subarray(idx, endPtr))
-    }
-    var str = "";
-    while (idx < endPtr) {
-        var u0 = heapOrArray[idx++];
-        if (!(u0 & 128)) {
-            str += String.fromCharCode(u0);
-            continue
-        }
-        var u1 = heapOrArray[idx++] & 63;
-        if ((u0 & 224) == 192) {
-            str += String.fromCharCode((u0 & 31) << 6 | u1);
-            continue
-        }
-        var u2 = heapOrArray[idx++] & 63;
-        if ((u0 & 240) == 224) {
-            u0 = (u0 & 15) << 12 | u1 << 6 | u2
-        } else {
-            u0 = (u0 & 7) << 18 | u1 << 12 | u2 << 6 | heapOrArray[idx++] & 63
-        }
-        if (u0 < 65536) {
-            str += String.fromCharCode(u0)
-        } else {
-            var ch = u0 - 65536;
-            str += String.fromCharCode(55296 | ch >> 10, 56320 | ch & 1023)
-        }
-    }
-    return str
-};
