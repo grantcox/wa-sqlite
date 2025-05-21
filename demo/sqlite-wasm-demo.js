@@ -1,7 +1,7 @@
 // Copyright 2024 Roy T. Hashimoto. All Rights Reserved.
-import * as SQLite from '../src/sqlite-constants.js';
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
 import { initMemoryVfs } from './SqliteWasmMemoryVFS.js';
+import { SqliteWasmMemoryToWorkerVFS, registerVfs } from './SqliteWasmMemoryToWorkerVFS.js';
 
 // This is the path to the Monaco editor distribution. For development
 // this loads from the local server (uses Yarn 2 path).
@@ -74,34 +74,49 @@ async function initSQLite() {
     // Instantiate SQLite
     const start = performance.now();
     log('Loading and initializing SQLite3 module...');
+
     const sqlite3 = await sqlite3InitModule({
       print: log,
       printErr: error,
     });
-    const memoryVfs = initMemoryVfs(sqlite3);
 
+    // const memoryVfs = initMemoryVfs(sqlite3);
+    // db = new sqlite3.oo1.DB({
+    //   filename: dbName,
+    //   vfs: memoryVfs.name
+    // });
 
-    // Open the database
+    const worker = new Worker(new URL('../src/examples/EncryptedOPFSWorker.js', import.meta.url), { type: 'module' });
+
+    // const vfsName = 'memory-worker';
+    // vfsInstance = new SqliteWasmMemoryToWorkerVFS(vfsName, sqlite3, {
+    //   dbName,
+    //   encryptionPassword: searchParams.get('password') || 'abcd123',
+    //   worker: worker,
+    //   syncLatencyMsec: 25
+    // });
+    // registerVfs(sqlite3, vfsInstance);
+    // db = new sqlite3.oo1.DB({
+    //   filename: dbName,
+    //   vfs: vfsName
+    // });
+
+    const vfsName = 'memory-worker';
+    const vfsController = registerVfs(sqlite3, {
+      name: vfsName,
+      dbName: dbName,
+      worker: worker,
+      syncLatencyMsec: 25,
+      encryptionPassword: searchParams.get('password') || 'abcd123',
+    });
     db = new sqlite3.oo1.DB({
       filename: dbName,
-      vfs: memoryVfs.name
+      vfs: vfsName
     });
+
     const end = performance.now();
     console.log(`SQLite opened ${dbName} in ${(end - start).toFixed(2)} ms`);
 
-    // if (hook) {
-    //   // tell the hook what SQLite db is being used, required for serialization
-    //   hook.useDatabase(db);
-
-    //   // load initial data into SQLite's in-memory db
-    //   const initialData = hook.popInitialData();
-    //   if (initialData) {
-    //     sqlite3.deserialize(db, initialData);
-    //   }
-
-    //   // register the commit hook, so we sync regularly
-    //   sqlite3.commit_hook(db, hook.commitHook.bind(hook));
-    // }
 
     db.exec('PRAGMA cache_size=-64000');
     db.exec('PRAGMA journal_mode=MEMORY');

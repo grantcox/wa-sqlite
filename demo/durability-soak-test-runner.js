@@ -68,7 +68,7 @@ function interruptTest() {
     worker = null;
   }
   if (vfsInstance) {
-    vfsInstance.shutdown();
+    vfsInstance.terminate();
     vfsInstance = null;
   }
   if (db) {

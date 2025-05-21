@@ -95,7 +95,7 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
     this.#initialData = null;
   }
 
-  shutdown() {
+  terminate() {
     if (this.#writeIntervalId) {
       clearInterval(this.#writeIntervalId);
       this.#writeIntervalId = null;
