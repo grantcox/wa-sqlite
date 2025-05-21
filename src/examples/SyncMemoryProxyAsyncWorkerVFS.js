@@ -13,7 +13,7 @@ import * as VFS from "../VFS.js";
  * @typedef {Object} VFSConfig
  * @property {string} encryptionPassword
  * @property {string} dbName
- * @property {Worker | () => Worker} worker
+ * @property {Worker | (() => Worker) | null} worker
  * @property {number} syncLatencyMsec
  */
 
@@ -119,7 +119,7 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
     super(name, module);
     this.#dbName = config.dbName ?? "db.sqlite";
     this.#writePushCadenceMsec = config.syncLatencyMsec ?? 25;
-    this.#worker = (config.worker instanceof Worker) ? config.worker : config.worker();
+    this.#worker =(config.worker instanceof Function) ? config.worker() : config.worker;
     this.#vfsReady = this.init(config);
   }
 
@@ -132,6 +132,12 @@ export class SyncMemoryProxyAsyncWorkerVFS extends FacadeVFS {
    */
   async init(config) {
     try {
+      if (!this.#worker) {
+        console.warn("SyncMemoryProxyAsyncWorkerVFS | No worker provided, will use memory only");
+        this.#workerSupportsWrites = false;
+        return true;
+      }
+
       // Set up message handler for worker
       const initPromise = new Promise((resolve, reject) => {
         const messageHandler = (event) => {
