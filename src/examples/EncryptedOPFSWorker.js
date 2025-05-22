@@ -6,13 +6,32 @@
  * with a page index header to ensure atomicity even when using the sync access handle APIs.
  */
 
-import { BaseWriteWorker } from './BaseWriteWorker.js';
+/**
+ * @typedef {Object} PendingOperation
+ * @property {'write'|'truncate'|'delete'} type
+ * @property {number} [offset]
+ * @property {number} [size]
+ */
+
+/**
+ * @typedef {Object} VFSConfig
+ * @property {string} encryptionPassword - Required password for encryption
+ * @property {string} [dbName] - Optional database name
+ * @property {number} [pageSize] - Optional page size to write
+ */
 
 /**
  * Worker implementation that persists data to OPFS with mandatory encryption
  * Uses an append-only strategy for page writes to ensure atomicity.
  */
-class EncryptedOPFSWorker extends BaseWriteWorker {
+class EncryptedOPFSWorker {
+  // if we detect this is a secondary tab, we disable writes
+  #writesEnabled = true;
+
+  /** @type {ArrayBuffer} */ fileData = null;
+  #initialized = false;
+  #encryptionKey = null;
+
   // OPFS state
   /** @type {FileSystemDirectoryHandle} */ #rootDir = null;
   #fileName = null;
@@ -38,20 +57,34 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
   /** @type {Set<number>} */ #freeOffsets = new Set(); // Set of offsets that can be reused
   #nextAppendOffset = this.#HEADER_SIZE; // First offset after the header
   
-  // No need for a write queue anymore as operations are passed directly
-  
+  // Concurrency control
+  #processingOperations = false;
+
+  // Queue for 'writes' messages
+  /** @type {Array<{operations: Array, databaseState: Uint8Array}>} */ #writeMessageQueue = [];
+
+  constructor() {
+    // Set up the message handler
+    self.onmessage = this.#handleMessage.bind(this);
+  }
+
   /**
-   * Initialize the worker with configuration
-   * @param {Object} config Worker configuration
+   * Base initialization
+   * @param {VFSConfig} config - Configuration parameters for the worker
    */
   async init(config) {
+    if (!config.encryptionPassword) {
+      throw new Error("Encryption password is required");
+    }
+    await this.buildEncryptionKey(config.encryptionPassword);
+    
     try {
       this.#dbName = config.dbName || "db.sqlite";
       this.#fileName = `${this.#dbName}.enc`;
       
-      // Encryption is required, verify key was created in base class
-      if (!this.getEncryptionKey()) {
-        throw new Error("Encryption key not initialized in base class");
+      // Encryption is required, verify key was created
+      if (!this.#encryptionKey) {
+        throw new Error("Encryption key not initialized");
       }
       
       // Set page size if provided (but maintain the fixed format)
@@ -68,122 +101,155 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
       console.error('EncryptedOPFSWorker | Initialization failed:', e);
       throw e;
     }
+
+    this.#initialized = true;
   }
 
-  totalSyncCount = 0;
-  totalSyncDuration = 0;
+  /**
+   * Initialize the encryption key from password
+   * @param {string} password - Password to derive key from
+   * @returns {Promise<CryptoKey>} - The derived encryption key
+   */
+  async buildEncryptionKey(password) {
+    if (!password) {
+      throw new Error("Encryption password is required");
+    }
+    
+    // Initialize encryption key from password
+    const encoder = new TextEncoder();
+    const passwordData = encoder.encode(password);
 
-  async sync(newDatabaseState) {
-    console.log("EncryptedOPFSWorker | Syncing database state, new state size:", newDatabaseState.byteLength);
+    // Derive a key from the password
+    const keyMaterial = await crypto.subtle.importKey(
+      "raw", 
+      passwordData, 
+      "PBKDF2", 
+      false, 
+      ["deriveBits", "deriveKey"]
+    );
 
-    if (!newDatabaseState) {
-      console.error("EncryptedOPFSWorker | Cannot sync without valid database state");
+    // Use PBKDF2 to derive a key
+    this.#encryptionKey = await crypto.subtle.deriveKey(
+      {
+        name: "PBKDF2",
+        salt: encoder.encode("wa-sqlite-encrypted-vfs"),
+        iterations: 100000,
+        hash: "SHA-256",
+      },
+      keyMaterial,
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["encrypt", "decrypt"]
+    );
+    
+    return this.#encryptionKey;
+  }
+
+  /**
+   * Get encryption key - accessor for internal use
+   * @returns {CryptoKey} Encryption key
+   */
+  getEncryptionKey() {
+    return this.#encryptionKey;
+  }
+
+  setWritesEnabled(enabled) {
+    this.#writesEnabled = enabled;
+  }
+
+  /**
+   * Handle message received from main thread
+   * @param {MessageEvent} e Message event
+   */
+  async #handleMessage(e) {
+    const msg = e.data;
+    
+    switch (msg.type) {
+      case 'init':
+        try {
+          await this.init(msg.config);
+          
+          // Send initialization complete message, with a copy of the file data
+          const initDataCopy = new Uint8Array(new Uint8Array(this.fileData));
+          self.postMessage({
+            type: 'initComplete',
+            fileData: initDataCopy,
+            writesEnabled: this.#writesEnabled
+          }, [initDataCopy.buffer]);
+
+        } catch (error) {
+          console.error('EncryptedOPFSWorker | Initialization failed:', error);
+          self.postMessage({
+            type: 'error',
+            message: error.message
+          });
+        }
+        break;
+        
+      case 'writes':
+        // Process database state and operations
+        if (!this.#initialized) {
+          throw new Error('Worker not initialized');
+        }
+        if (this.#writesEnabled) {
+          this.#handleWrites(msg.operations, msg.databaseState);
+        }
+        break;
+
+      default:
+        console.error('EncryptedOPFSWorker | Unknown message type:', msg.type);
+    }
+  }
+
+  /**
+   * Handle a batch of write operations and a new database state
+   * @param {Array<PendingOperation>} operations - Array of operations that were performed
+   * @param {Uint8Array} databaseState - The new complete database state
+   */
+  #handleWrites(operations, databaseState) {
+    // Add this message to the queue
+    this.#writeMessageQueue.push({
+      operations,
+      databaseState
+    });
+
+    // Start processing the queue (will exit immediately if already running)
+    this.#processWriteMessageQueue();
+  }
+
+  /**
+   * Process queued write messages
+   */
+  async #processWriteMessageQueue() {
+    // If already processing, exit early - the current processor will handle new items
+    if (this.#processingOperations) {
       return;
     }
 
-    // In read-only mode (no access handle), just update the in-memory state
-    if (!this.#accessHandle) {
-      console.log("EncryptedOPFSWorker | In read-only mode, updating in-memory state only");
-      this.fileData = newDatabaseState;
-      return;
-    }
-    const start = performance.now();
+    // Set processing flag
+    this.#processingOperations = true;
 
-    const currentData = this.fileData;
-    const sourcePageSize = this.#sourcePageSize;
-    
-    // Track dirty pages that need to be written
-    /** @type {Set<number>} */ const dirtyPages = new Set();
-    /** @type {Map<number, number>} */ const updatedPageIndex = new Map(this.#pageIndex);
-    
-    // Calculate number of pages in each database state
-    const newPageCount = Math.ceil(newDatabaseState.byteLength / sourcePageSize);
-    const currentPageCount = currentData ? Math.ceil(currentData.byteLength / sourcePageSize) : 0;
+    try {
+      // Process all messages in the queue
+      while (this.#writeMessageQueue.length > 0) {
+        const message = this.#writeMessageQueue.shift();
 
-    // Create views for easier comparison
-    const newView = new Uint8Array(newDatabaseState);
-    const currentView = currentData ? new Uint8Array(currentData) : new Uint8Array(0);
-    
-    // Compare pages to identify changes
-    for (let pageIndex = 0; pageIndex < Math.max(newPageCount, currentPageCount); pageIndex++) {
-      const pageStart = pageIndex * sourcePageSize;
-      
-      // Handle truncation - remove pages beyond the new database size
-      if (pageIndex >= newPageCount && pageIndex < currentPageCount) {
-        // This page exists in current but not in new (truncated)
-        updatedPageIndex.delete(pageIndex);
-        continue;
-      }
+        // Update the in-memory database state
+        this.fileData = message.databaseState.buffer;
 
-      // If page doesn't exist in current database, it's new and needs to be written
-      if (pageIndex >= currentPageCount) {
-        dirtyPages.add(pageIndex);
-        continue;
+        // Call processWriteQueue to persist changes with all operations
+        await this.processWriteQueue(message.operations);
       }
-      
-      // Compare page content to detect changes
-      const pageEnd = Math.min(pageStart + sourcePageSize, newDatabaseState.byteLength);
-      const bytesToCompare = pageEnd - pageStart;
-      
-      // Simple hash calculation by summing bytes (sufficient for change detection)
-      let currentPageHash = 0;
-      let newPageHash = 0;
-      
-      for (let i = 0; i < bytesToCompare; i++) {
-        const currentOffset = pageStart + i;
-        if (currentOffset < currentView.length) {
-          currentPageHash += currentView[currentOffset];
-        }
-        
-        newPageHash += newView[currentOffset];
-      }
-      
-      // If hash differs, page content has changed
-      if (currentPageHash !== newPageHash) {
-        dirtyPages.add(pageIndex);
+    } finally {
+      // Clear processing flag
+      this.#processingOperations = false;
+
+      // If new messages arrived while we were processing, start processing again
+      if (this.#writeMessageQueue.length > 0) {
+        // Use setTimeout to prevent stack overflow with deep recursion
+        setTimeout(() => this.#processWriteMessageQueue(), 0);
       }
     }
-    console.log(`EncryptedOPFSWorker | Sync compared old and new database, found ${dirtyPages.size} dirty pages in ${(performance.now() - start).toFixed(1)} ms`);
-    
-    // Update the in-memory database state
-    this.fileData = newDatabaseState;
-    
-    const pageWriteStart = performance.now();
-    // Write all dirty pages
-    if (dirtyPages.size > 0) {
-      // Write changed pages
-      try {
-        const writePages = Array.from(dirtyPages);
-        const offsets = await this.#writePages(writePages);
-        
-        // Update the page index with new locations
-        for (let i = 0; i < offsets.length; i++) {
-          const pageIndex = writePages[i];
-          const offset = offsets[i];
-          updatedPageIndex.set(pageIndex, offset);
-        }
-        
-        // Write the updated page index
-        await this.#writePageIndex(updatedPageIndex);
-        
-        // Update our in-memory page index
-        this.#pageIndex = updatedPageIndex;
-        
-        // Sync changes to disk
-        this.#accessHandle.flush();
-        const end = performance.now();
-        
-        console.log(`EncryptedOPFSWorker | Sync: Wrote ${dirtyPages.size} pages in ${(end - start).toFixed(1)} ms`);
-      } catch (e) {
-        console.error(`EncryptedOPFSWorker | Sync failed: ${e.message}`);
-      }
-    } else {
-      console.log(`EncryptedOPFSWorker | Sync: No page changes detected`);
-    }
-
-    this.totalSyncCount++;
-    this.totalSyncDuration += (performance.now() - start);
-    console.log(`EncryptedOPFSWorker | Sync completed, total sync count: ${this.totalSyncCount}, total duration: ${this.totalSyncDuration.toFixed(1)} ms`);
   }
 
   /**
@@ -680,15 +746,6 @@ class EncryptedOPFSWorker extends BaseWriteWorker {
    */
   #getPageStart(pageIndex) {
     return pageIndex * this.#sourcePageSize;
-  }
-
-  /**
-   * Get the end offset of a page (exclusive)
-   * @param {number} pageIndex - Page index
-   * @returns {number} - Byte offset of the end of the page
-   */
-  #getPageEnd(pageIndex) {
-    return (pageIndex + 1) * this.#sourcePageSize;
   }
 
   /**
