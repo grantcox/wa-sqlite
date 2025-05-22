@@ -51,13 +51,16 @@ const searchParams = new URLSearchParams(location.search);
     }
   },
   {
-    name: 'CommitHook',
-    hookOptions: { 
+    name: 'MemoryWorkerJournaledVFS',
+    vfsModule: '../src/examples/MemoryWorkerJournaledVFS.js',
+    vfsOptions: { 
       encryptionPassword: searchParams.get('password') || 'abcd123',
-      workerUrl: new URL('../src/examples/EncryptedOPFSWorker.js', import.meta.url).toString()
-    },
-    vfsModule: null
-  },
+      filePrefix: 'sync-demo',
+      worker: () => {
+        return new Worker(new URL('../src/examples/EncryptedJournaledOPFSWorker.js', import.meta.url), { type: 'module' });
+      }
+    }
+  }
 ].map(config => [config.name, config]));
 
 // SQLite instance and database connection
@@ -121,9 +124,13 @@ async function initSQLite() {
       sqlite3.commit_hook(db, hook.commitHook.bind(hook));
     }
 
+    console.warn("Created SQLite, now setting PRAGMAs");
+    sqlite3.sync_exec(db, 'PRAGMA journal_mode=WAL');
+    sqlite3.sync_exec(db, 'PRAGMA synchronous=NORMAL');
     sqlite3.sync_exec(db, 'PRAGMA cache_size=-64000');
-    sqlite3.sync_exec(db, 'PRAGMA journal_mode=MEMORY');
     sqlite3.sync_exec(db, 'PRAGMA page_size=4096');
+
+    console.warn("PRAGMAs set");
 
     // Return success
     document.getElementById('output').innerHTML =
