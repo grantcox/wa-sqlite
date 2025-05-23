@@ -542,6 +542,7 @@ declare interface SQLiteAPI {
    */
   finalize(stmt: number): Promise<number>;
   sync_finalize(stmt: number): number;
+  get_statements(db: number): Array<number>;
 
   /**
    * Test for autocommit mode

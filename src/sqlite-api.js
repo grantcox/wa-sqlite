@@ -487,6 +487,17 @@ export function Factory(Module) {
     };
   })();
 
+  sqlite3.get_statements = function(forDb) {
+    verifyDatabase(forDb);
+    const stmts = [];
+    for (const [stmt, db] of mapStmtToDB.entries()) {
+      if (db === forDb) {
+        stmts.push(stmt);
+      }
+    }
+    return stmts;
+  }
+
   sqlite3.get_autocommit = (function() {
     const fname = 'sqlite3_get_autocommit';
     const f = Module.cwrap(fname, ...decl('n:n'));
