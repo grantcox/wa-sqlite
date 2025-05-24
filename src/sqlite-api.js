@@ -454,8 +454,6 @@ export function Factory(Module) {
           callback(row, columns);
         }
       }
-    }
-    for (const stmt of stmts) {
       sqlite3.sync_finalize(stmt);
     }
     return SQLite.SQLITE_OK;
