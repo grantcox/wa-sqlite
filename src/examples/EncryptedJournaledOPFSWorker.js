@@ -86,6 +86,7 @@ class EncryptedJournaledOPFSWorker {
   /** @type {Map<string, Array<WriteMessage>>} */ #writeMessageQueues = new Map();
 
   /** @type {Map<string, number>} */ #writeTotalDuration = new Map();
+  /** @type {Map<string, number>} */ #writeTotalPages = new Map();
 
   constructor() {
     // Set up the message handler
@@ -542,7 +543,9 @@ class EncryptedJournaledOPFSWorker {
     } finally {
       const end = performance.now();
       this.#writeTotalDuration.set(filename, (this.#writeTotalDuration.get(filename) || 0) + (end - start));
-      console.log(`EncryptedJournaledOPFSWorker | ${filename}: Wrote ${writtenPageCount} pages in ${(end - start).toFixed(1)} ms (total time in this file: ${this.#writeTotalDuration.get(filename).toFixed(1)} ms)`);
+      this.#writeTotalPages.set(filename, (this.#writeTotalPages.get(filename) || 0) + writtenPageCount);
+      console.log(`EncryptedJournaledOPFSWorker | ${filename}: Wrote ${writtenPageCount} pages in ${(end - start).toFixed(1)} ms`);
+      console.log(`EncryptedJournaledOPFSWorker | ${filename}: Total write time ${this.#writeTotalDuration.get(filename).toFixed(1)} ms for ${this.#writeTotalPages.get(filename)} pages`);
     }
   }
 
