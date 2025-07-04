@@ -30,7 +30,7 @@ const searchParams = new URLSearchParams(location.search);
  * @property {string} [vfsClassName] name of the VFS class
  * @property {string} [vfsName] name of the VFS instance
  * @property {object} [vfsOptions] VFS constructor arguments
- * @property {object} [hookOptions] Commit Hook options
+ * @property {string[]} [pragmas] PRAGMA statements to execute
  */
 
 /** @type {Map<string, Config>} */ const VFS_CONFIGS = new Map([
@@ -52,6 +52,22 @@ const searchParams = new URLSearchParams(location.search);
         return new Worker(new URL('../src/examples/EncryptedOPFSWorker.js', import.meta.url), { type: 'module' });
       }
     }
+  },
+  {
+    name: 'SqliteWasmMemoryWorkerJournaledVFS',
+    vfsModule: '../src/examples/SqliteWasmMemoryWorkerJournaledVFS.js',
+    vfsOptions: { 
+      encryptionPassword: searchParams.get('password') || 'abcd123',
+      worker: () => {
+        return new Worker(new URL('../src/examples/EncryptedJournaledOPFSWorker.js', import.meta.url), { type: 'module' });
+      }
+    },
+    pragmas: [
+      'PRAGMA journal_mode=WAL',
+      'PRAGMA synchronous=NORMAL',
+      'PRAGMA cache_size=-64000',
+      'PRAGMA page_size=4096',
+    ]
   },
 ].map(config => [config.name, config]));
 
@@ -102,9 +118,14 @@ async function initSQLite() {
     const end = performance.now();
     console.log(`SQLite opened ${dbName} in ${(end - start).toFixed(2)} ms`);
 
-    db.exec('PRAGMA cache_size=-64000');
-    db.exec('PRAGMA journal_mode=MEMORY');
-    db.exec('PRAGMA page_size=4096');
+    const pragmas = config.pragmas || [
+      'PRAGMA cache_size=-64000',
+      'PRAGMA journal_mode=MEMORY',
+      'PRAGMA page_size=4096',
+    ];
+    for (const pragma of pragmas) {
+      db.exec(pragma);
+    }
 
     // Return success
     document.getElementById('output').innerHTML =
