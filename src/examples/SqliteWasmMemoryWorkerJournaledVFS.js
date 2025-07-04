@@ -43,6 +43,7 @@ export function registerVfs(sqlite3, vfsName, options = {}) {
   const initialFiles = new Map();
   const pendingWritesMap = new Map();
   const syncCount = new Map();
+  const fileSizes = new Map();
   let workerSupportsWrites = true;
   let initCompletePromise = null;
   let initCompleteResolve = null;
@@ -168,8 +169,9 @@ export function registerVfs(sqlite3, vfsName, options = {}) {
       );
     }
     
-    console.log(`SqliteWasmMemoryWorkerJournaledVFS | syncFileToWorker for ${filename}: Range ${minOffset}-${maxOffset} (${dataCopy.byteLength} bytes out of ${fileData.byteLength})`);
-
+    // Get the logical file size
+    const logicalSize = fileSizes.get(filename) || 0;
+    
     // Send the snapshot and operations to the worker
     worker.postMessage({
       type: 'writes',
@@ -177,7 +179,7 @@ export function registerVfs(sqlite3, vfsName, options = {}) {
       filename: filename,
       databaseState: snapshotData,
       startOffset: minOffset,
-      totalSize: fileData.byteLength
+      totalSize: logicalSize
     }, [snapshotData.buffer]);
   };
   
@@ -242,6 +244,7 @@ export function registerVfs(sqlite3, vfsName, options = {}) {
         
         if (f.flags & capi.SQLITE_OPEN_DELETEONCLOSE) {
           fileStorage.delete(f.filename);
+          fileSizes.delete(f.filename);
           if (isTrackedFile(f.filename)) {
             queueDelete(f.filename);
             syncFileToWorker(f.filename);
@@ -289,7 +292,7 @@ export function registerVfs(sqlite3, vfsName, options = {}) {
         const offset = Number(offset64);
         let fileData = fileStorage.get(f.filename);
         const requiredSize = offset + nBytes;
-        
+
         // Resize the ArrayBuffer if needed
         if (!fileData || fileData.byteLength < requiredSize) {
           // Create a new, larger buffer
@@ -310,6 +313,11 @@ export function registerVfs(sqlite3, vfsName, options = {}) {
         const destView = new Uint8Array(fileData, offset, nBytes);
         destView.set(wasm.heap8u().subarray(pSrc, pSrc + nBytes));
         
+        // Update the logical file size (maximum of current size and end of this write)
+        const currentSize = fileSizes.get(f.filename) || 0;
+        const newLogicalSize = Math.max(currentSize, offset + nBytes);
+        fileSizes.set(f.filename, newLogicalSize);
+        
         // If this is a tracked file, queue the write operation
         if (isTrackedFile(f.filename)) {
           queueWrite(f.filename, offset, nBytes);
@@ -328,10 +336,11 @@ export function registerVfs(sqlite3, vfsName, options = {}) {
       
       try {
         const size = Number(size64);
+        fileSizes.set(f.filename, size);
+
         const fileData = fileStorage.get(f.filename);
-        
         if (fileData) {
-          // If requested size is smaller than current, create a smaller buffer
+          // If requested size is smaller than current buffer, create a smaller buffer
           if (size < fileData.byteLength) {
             const newBuffer = new ArrayBuffer(size);
             new Uint8Array(newBuffer).set(new Uint8Array(fileData, 0, size));
@@ -342,7 +351,7 @@ export function registerVfs(sqlite3, vfsName, options = {}) {
               queueTruncate(f.filename, size);
             }
           }
-          // If larger, we don't need to do anything as xWrite will handle expansion
+          // If larger, we don't need to resize the buffer as xWrite will handle expansion
         }
         
         return 0;
@@ -378,8 +387,8 @@ export function registerVfs(sqlite3, vfsName, options = {}) {
       if (!f) return capi.SQLITE_IOERR;
       
       try {
-        const fileData = fileStorage.get(f.filename);
-        const size = fileData ? fileData.byteLength : 0;
+        // Return the logical file size, not the buffer size
+        const size = fileSizes.get(f.filename) || 0;
         wasm.poke(pSize64, size, 'i64');
         return 0;
       } catch (e) {
@@ -439,6 +448,9 @@ export function registerVfs(sqlite3, vfsName, options = {}) {
           // Use the buffered data for this file
           const initialData = initialFiles.get(filename);
           fileStorage.set(filename, initialData);
+          // Initialize the logical file size to the buffer size
+          // TODO: The worker should send the logical size separately
+          fileSizes.set(filename, initialData.byteLength);
           // Remove from initialFiles after it's been used
           initialFiles.delete(filename);
         }
@@ -446,6 +458,8 @@ export function registerVfs(sqlite3, vfsName, options = {}) {
         // If file doesn't exist but we're asked to create it
         if (!fileStorage.has(filename) && (flags & capi.SQLITE_OPEN_CREATE)) {
           fileStorage.set(filename, new ArrayBuffer(0));
+          // Initialize the logical file size to 0
+          fileSizes.set(filename, 0);
         }
         
         // If file doesn't exist and we're not creating, return error
@@ -476,6 +490,7 @@ export function registerVfs(sqlite3, vfsName, options = {}) {
       try {
         const filename = wasm.cstrToJs(zName);
         const result = fileStorage.delete(filename);
+        fileSizes.delete(filename);
         
         // If this is a tracked file, queue a delete operation
         if (isTrackedFile(filename)) {
@@ -621,8 +636,6 @@ export function registerVfs(sqlite3, vfsName, options = {}) {
      * Destroy the database file in memory and trigger worker deletion
      */
     destroyDatabase: function() {
-      console.log("SqliteWasmMemoryWorkerJournaledVFS | destroyDatabase");
-
       // Delete all files
       for (const filename of fileStorage.keys()) {
         if (isTrackedFile(filename)) {
@@ -635,6 +648,7 @@ export function registerVfs(sqlite3, vfsName, options = {}) {
       fileStorage.clear();
       initialFiles.clear();
       pendingWritesMap.clear();
+      fileSizes.clear();
     },
     
     /**
@@ -651,6 +665,7 @@ export function registerVfs(sqlite3, vfsName, options = {}) {
       }
       initialFiles.clear();
       pendingWritesMap.clear();
+      fileSizes.clear();
     },
     
     /**
@@ -683,6 +698,7 @@ export function registerVfs(sqlite3, vfsName, options = {}) {
      */
     clearStorage: function() {
       fileStorage.clear();
+      fileSizes.clear();
     },
     
     /**
@@ -717,7 +733,9 @@ export function registerVfs(sqlite3, vfsName, options = {}) {
       if (!(buffer instanceof ArrayBuffer)) {
         throw new Error("Data must be an ArrayBuffer");
       }
-      fileStorage.set(filename || dbName, buffer.slice(0)); // Use slice to clone the buffer
+      const fname = filename || dbName;
+      fileStorage.set(fname, buffer.slice(0)); // Use slice to clone the buffer
+      fileSizes.set(fname, buffer.byteLength);
     },
     
     /**
@@ -731,6 +749,7 @@ export function registerVfs(sqlite3, vfsName, options = {}) {
       fileStorage.clear();
       pendingWritesMap.clear();
       initialFiles.clear();
+      fileSizes.clear();
     }
   };
 }
