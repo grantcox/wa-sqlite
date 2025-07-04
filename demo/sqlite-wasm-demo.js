@@ -1,7 +1,8 @@
 // Copyright 2024 Roy T. Hashimoto. All Rights Reserved.
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
-import { initMemoryVfs } from './SqliteWasmMemoryVFS.js';
-import { SqliteWasmMemoryToWorkerVFS, registerVfs } from './SqliteWasmMemoryToWorkerVFS.js';
+import { initMemoryVfs } from '../src/examples/SqliteWasmMemoryVFS.js';
+import { registerVfs } from '../src/examples/SqliteWasmMemoryToWorkerVFS.js';
+import { StatementCache } from './statement-cache.js';
 
 // This is the path to the Monaco editor distribution. For development
 // this loads from the local server (uses Yarn 2 path).
@@ -55,7 +56,6 @@ const searchParams = new URLSearchParams(location.search);
 const log = console.log;
 const error = console.error;
 
-
 // SQLite instance and database connection
 /** @type {Sqlite3Static} */ let sqlite3;
 /** @type {Database} */ let db;
@@ -75,7 +75,7 @@ async function initSQLite() {
     const start = performance.now();
     log('Loading and initializing SQLite3 module...');
 
-    const sqlite3 = await sqlite3InitModule({
+    sqlite3 = await sqlite3InitModule({
       print: log,
       printErr: error,
     });
@@ -109,6 +109,8 @@ async function initSQLite() {
       syncLatencyMsec: 25,
       encryptionPassword: searchParams.get('password') || 'abcd123',
     });
+    await vfsController.isReady();
+
     db = new sqlite3.oo1.DB({
       filename: dbName,
       vfs: vfsName
@@ -152,49 +154,9 @@ function executeSQL(query) {
   return { results, elapsed };
 }
 
-class StatementCache {
-  constructor(capacity, evictionCallback) {
-    this.capacity = capacity;
-    this.evictionCallback = evictionCallback;
-    this.cache = new Map();
-  }
-
-  // Get value and mark as recently used
-  /**
-   * 
-   * @param {string} key 
-   * @returns {PreparedStatement} value
-   */
-  get(key) {
-    if (!this.cache.has(key)) {
-      return undefined;
-    }
-    
-    // Remove and re-add to make it the most recently used
-    const value = this.cache.get(key);
-    this.cache.delete(key);
-    this.cache.set(key, value);
-    
-    return value;
-  }
-
-  // Add or update an entry
-  set(key, value) {
-    // If key exists, delete it first to update its position
-    if (this.cache.has(key)) {
-      this.cache.delete(key);
-    } else if (this.cache.size >= this.capacity) {
-      // Map.keys().next() gives us the oldest key (least recently used)
-      const oldestKey = this.cache.keys().next().value;
-      this.cache.delete(oldestKey);
-      this.evictionCallback(oldestKey);
-    }
-    this.cache.set(key, value);
-  }
-}
 const statementCache = new StatementCache(100, stmt => {
   // release the statement handle
-  sqlite3.sync_finalize(stmt);
+  stmt.finalize();
 });
 
 let statementsPrepared = 0;
@@ -205,7 +167,7 @@ function executeSingleQuery(sql, queryArguments) {
   let stmt = statementCache.get(sql);
   if (stmt) {
     // Reuse the cached statement
-    stmt.reset();
+    stmt.reset(true);
     statementsReused++;
   } else {
     stmt = db.prepare(sql);
@@ -215,7 +177,7 @@ function executeSingleQuery(sql, queryArguments) {
 
   // Bind parameters if provided
   if (queryArguments && queryArguments.length > 0) {
-    stmt.bind_collection(queryArguments);
+    stmt.bind(queryArguments);
   }
 
   let columns = [];
@@ -381,13 +343,14 @@ async function init() {
     
     if (fileExtension === 'json') {
       // Process JSON file as sample queries
+      let sampleQueries;
       try {
-        const sampleQueries = JSON.parse(fileContent);
-        // await groupSampleQueries(sampleQueries);
-        await runSampleQueries(sampleQueries);
+        sampleQueries = JSON.parse(fileContent);
       } catch (e) {
         output.innerHTML = `<pre>Error parsing JSON: ${e.message}</pre>`;
+        return;
       }
+      await runSampleQueries(sampleQueries);
     }
 
     executeButton.disabled = false;

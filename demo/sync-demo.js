@@ -3,6 +3,7 @@
 import * as SQLite from '../src/sqlite-api.js';
 import SQLiteESMFactory from '../dist/wa-sqlite.mjs';
 import { AsyncWorkerCommitHook } from '../src/examples/AsyncWorkerCommitHook.js'
+import { StatementCache } from './statement-cache.js';
 
 // This is the path to the Monaco editor distribution. For development
 // this loads from the local server (uses Yarn 2 path).
@@ -172,41 +173,6 @@ function executeSQL(query) {
   }
 }
 
-class StatementCache {
-  constructor(capacity, evictionCallback) {
-    this.capacity = capacity;
-    this.evictionCallback = evictionCallback;
-    this.cache = new Map();
-  }
-
-  // Get value and mark as recently used
-  get(key) {
-    if (!this.cache.has(key)) {
-      return undefined;
-    }
-    
-    // Remove and re-add to make it the most recently used
-    const value = this.cache.get(key);
-    this.cache.delete(key);
-    this.cache.set(key, value);
-    
-    return value;
-  }
-
-  // Add or update an entry
-  set(key, value) {
-    // If key exists, delete it first to update its position
-    if (this.cache.has(key)) {
-      this.cache.delete(key);
-    } else if (this.cache.size >= this.capacity) {
-      // Map.keys().next() gives us the oldest key (least recently used)
-      const oldestKey = this.cache.keys().next().value;
-      this.cache.delete(oldestKey);
-      this.evictionCallback(oldestKey);
-    }
-    this.cache.set(key, value);
-  }
-}
 const statementCache = new StatementCache(100, stmt => {
   // release the statement handle
   sqlite3.sync_finalize(stmt);

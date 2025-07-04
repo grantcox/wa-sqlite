@@ -6,194 +6,6 @@
  * 
  * Based on SyncMemoryProxyAsyncWorkerVFS.js and SqliteWasmMemoryVFS.js
  */
-import { FacadeVFS } from "../src/FacadeVFS.js";
-import * as VFS from "../src/VFS.js";
-
-/**
- * @typedef {Object} MappedFile
- * @property {string} pathname
- * @property {number} flags
- * @property {number} size
- * @property {ArrayBuffer} data
- */
-
-/**
- * @typedef {Object} VFSConfig
- * @property {string} encryptionPassword
- * @property {string} dbName
- * @property {Worker | (() => Worker) | null} worker
- * @property {number} syncLatencyMsec
- */
-
-/**
- * @typedef {Object} PendingWriteOperation
- * @property {'write' | 'truncate' | 'delete'} type
- * @property {number} [offset]
- * @property {number} [size]
- */
-
-/**
- * A memory-based VFS for sqlite-wasm that asynchronously persists changes to a worker
- */
-export class SqliteWasmMemoryToWorkerVFS extends FacadeVFS {
-  // Map of SQLite files, keyed by filename.
-  /** @type {Map<string, MappedFile>} */ mapNameToFile = new Map();
-
-  // Map of SQLite files, keyed by id (sqlite3_file pointer).
-  /** @type {Map<number, MappedFile>} */ mapIdToFile = new Map();
-
-  // Worker for handling persistence operations
-  /** @type {Worker} */ #worker = null;
-  #workerSupportsWrites = true;
-
-  // Track if VFS (and worker) is ready
-  /** @type {Promise<boolean>} */ #vfsReady = null;
-
-  // This is the name of the SQLite file we are persisting via worker
-  #dbName = "db.sqlite";
-
-  // Buffer for initial data loaded by the worker
-  /** @type {ArrayBuffer} */ #initialData = null;
-
-  #writePushCadenceMsec = 25;
-
-  // Array of pending operations to track what has changed
-  /** @type {Array<PendingWriteOperation>} */ #pendingWrites = [];
-
-  // Interval ID for the periodic write sender
-  #writeIntervalId = null;
-
-  // SQLite3 module for wasm compatibility
-  /** @type {Object} */ sqlite3 = null;
-  
-  /**
-   * Creates a new instance of SqliteWasmMemoryToWorkerVFS
-   * 
-   * @param {string} name - VFS name
-   * @param {Object} sqlite3 - sqlite3 module
-   * @param {VFSConfig} config - Configuration options
-   */
-  constructor(name, sqlite3, config = {}) {
-    const waModule = {
-      HEAPU8: sqlite3.wasm.heap8u(),
-      UTF8ToString: sqlite3.wasm.cstrToJs
-    };
-    super(name, waModule);
-    this.sqlite3 = sqlite3;
-    this.#dbName = config.dbName ?? "db.sqlite";
-    this.#writePushCadenceMsec = config.syncLatencyMsec ?? 25;
-    this.#worker = (config.worker instanceof Function) ? config.worker() : config.worker;
-    this.#vfsReady = this.init(config);
-  }
-
-  /**
-   * Create and initialize the VFS
-   * 
-   * @param {string} name - VFS name
-   * @param {Object} sqlite3 - sqlite3 module
-   * @param {VFSConfig} config - Configuration options
-   * @returns {Promise<SqliteWasmMemoryToWorkerVFS>}
-   */
-  static async create(name, sqlite3, config = {}) {
-    const vfs = new SqliteWasmMemoryToWorkerVFS(name, sqlite3, config);
-    await vfs.isReady();
-    return vfs;
-  }
-
-  /**
-   * Wait for VFS initialization to complete
-   */
-  async isReady() {
-    return this.#vfsReady;
-  }
-
-  /**
-   * Get a readable indicator of whether the VFS is read-only
-   */
-  get isReadOnly() {
-    return !this.#workerSupportsWrites;
-  }
-
-  /**
-   * Export a copy of the current database from memory
-   * 
-   * @returns {ArrayBuffer|null} Database contents or null if not found
-   */
-  exportDatabase() {
-    // Return a copy of the current SQLite database file
-    const file = this.mapNameToFile.get(`/${this.#dbName}`);
-    if (file && file.data) {
-      // Create a new ArrayBuffer to hold the copied data
-      const newBuffer = new ArrayBuffer(file.data.byteLength);
-      const sourceView = new Uint8Array(file.data);
-      const newView = new Uint8Array(newBuffer);
-      
-      // Copy all data from original to new buffer
-      newView.set(sourceView);
-      
-      // Return this copied buffer
-      return newBuffer;
-    }
-    return null;
-  }
-
-  /**
-   * Destroy the database file in memory and trigger worker deletion
-   */
-  destroyDatabase() {
-    this.#queueDelete();
-    this.#sendPendingWrites();
-    this.mapNameToFile.clear();
-    this.#initialData = null;
-  }
-
-  /**
-   * Shut down the VFS and release resources
-   */
-  terminate() {
-    if (this.#writeIntervalId) {
-      clearInterval(this.#writeIntervalId);
-      this.#writeIntervalId = null;
-    }
-    if (this.#worker) {
-      this.#worker.terminate();
-      this.#worker = null;
-    }
-    this.mapNameToFile.clear();
-    this.mapIdToFile.clear();
-    this.#initialData = null;
-    this.#pendingWrites = [];
-  }
-
-  /**
-   * Process all pending operations and close the VFS
-   */
-  close() {
-    // Cancel the write interval
-    if (this.#writeIntervalId) {
-      clearInterval(this.#writeIntervalId);
-      this.#writeIntervalId = null;
-    }
-
-    // Close all open files
-    for (const fileId of this.mapIdToFile.keys()) {
-      this.jClose(fileId);
-    }
-
-    // Force send any pending writes
-    this.#sendPendingWrites();
-
-    // Terminate the worker after a short delay to allow pending operations to complete
-    setTimeout(() => {
-      if (this.#worker) {
-        this.#worker.terminate();
-        this.#worker = null;
-      }
-    }, 100);
-  }
-}
-
-
 
 /**
  * Register this VFS with sqlite-wasm
@@ -231,10 +43,12 @@ export function registerVfs(sqlite3, options = {}) {
   
   // In-memory storage for files
   const fileStorage = new Map();
-  let initialData = options.initialData || null;
+  let initialData = null;
   let pendingWrites = [];
   let writeIntervalId = null;
   let workerSupportsWrites = true;
+  let initCompletePromise = null;
+  let initCompleteResolve = null;
   
   // VFS configuration
   memoryVfs.$iVersion = 2;
@@ -249,9 +63,15 @@ export function registerVfs(sqlite3, options = {}) {
   memoryVfs.addOnDispose('$zName', memoryVfs.$zName);
   memoryIoMethods.$iVersion = 1;
 
+  // Create the initialization promise
+  initCompletePromise = new Promise((resolve) => {
+    initCompleteResolve = resolve;
+  });
+
   // Initialize worker if provided
   if (worker) {
     worker.addEventListener('message', (event) => {
+      // console.log('SqliteWasmMemoryToWorkerVFS | Received message from worker:', event.data);
       const msg = event.data;
       if (msg.type === 'initComplete') {
         initialData = msg.fileData?.buffer || new ArrayBuffer(0);
@@ -262,6 +82,12 @@ export function registerVfs(sqlite3, options = {}) {
           writeIntervalId = setInterval(() => {
             sendPendingWrites();
           }, syncLatencyMsec);
+        }
+        
+        // Resolve the initialization promise
+        if (initCompleteResolve) {
+          initCompleteResolve(true);
+          initCompleteResolve = null;
         }
       }
     });
@@ -274,6 +100,12 @@ export function registerVfs(sqlite3, options = {}) {
         dbName: dbName,
       }
     });
+  } else {
+    // No worker provided, resolve immediately
+    if (initCompleteResolve) {
+      initCompleteResolve(true);
+      initCompleteResolve = null;
+    }
   }
   
   // Helper to generate a random filename if none is specified
@@ -331,7 +163,7 @@ export function registerVfs(sqlite3, options = {}) {
     // Create a copy to send
     const dbCopy = new Uint8Array(fileData.byteLength);
     dbCopy.set(new Uint8Array(fileData));
-    
+
     // Send to worker
     worker.postMessage({
       type: 'writes',
@@ -700,6 +532,101 @@ export function registerVfs(sqlite3, options = {}) {
   return {
     vfs: memoryVfs,
     name: vfsName,
+    
+    /**
+     * Returns a promise that resolves when the worker has initialized and initial data has been loaded
+     * @returns {Promise<boolean>} Promise that resolves after initComplete message is received
+     */
+    isReady: function() {
+      return initCompletePromise;
+    },
+    
+    /**
+     * Get a readable indicator of whether the VFS is read-only
+     * @returns {boolean} True if VFS is read-only, false otherwise
+     */
+    get isReadOnly() {
+      return !workerSupportsWrites;
+    },
+    
+    /**
+     * Export a copy of the current database from memory
+     * @returns {ArrayBuffer|null} Database contents or null if not found
+     */
+    exportDatabase: function() {
+      // Return a copy of the current SQLite database file
+      const fileData = fileStorage.get(dbName);
+      if (fileData) {
+        // Create a new ArrayBuffer to hold the copied data
+        const newBuffer = new ArrayBuffer(fileData.byteLength);
+        const sourceView = new Uint8Array(fileData);
+        const newView = new Uint8Array(newBuffer);
+        
+        // Copy all data from original to new buffer
+        newView.set(sourceView);
+        
+        // Return this copied buffer
+        return newBuffer;
+      }
+      return null;
+    },
+    
+    /**
+     * Destroy the database file in memory and trigger worker deletion
+     */
+    destroyDatabase: function() {
+      queueDelete();
+      sendPendingWrites();
+      fileStorage.clear();
+      initialData = null;
+    },
+    
+    /**
+     * Shut down the VFS and release resources
+     */
+    terminate: function() {
+      if (writeIntervalId) {
+        clearInterval(writeIntervalId);
+        writeIntervalId = null;
+      }
+      if (worker) {
+        worker.terminate();
+        worker = null;
+      }
+      fileStorage.clear();
+      for (const fileId of Object.keys(openFiles)) {
+        delete openFiles[fileId];
+      }
+      initialData = null;
+      pendingWrites = [];
+    },
+    
+    /**
+     * Process all pending operations and close the VFS
+     */
+    close: function() {
+      // Cancel the write interval
+      if (writeIntervalId) {
+        clearInterval(writeIntervalId);
+        writeIntervalId = null;
+      }
+
+      // Close all open files
+      for (const fileId of Object.keys(openFiles)) {
+        ioMethods.xClose(fileId);
+      }
+
+      // Force send any pending writes
+      sendPendingWrites();
+
+      // Terminate the worker after a short delay to allow pending operations to complete
+      setTimeout(() => {
+        if (worker) {
+          worker.terminate();
+          worker = null;
+        }
+      }, 100);
+    },
     
     /**
      * Clears all storage in the memory VFS
