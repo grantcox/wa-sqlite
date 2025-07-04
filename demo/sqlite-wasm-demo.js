@@ -1,7 +1,9 @@
+// Test URLs:
+// - http://localhost:8000/demo/sqlite-wasm-demo.html?config=SqliteWasmMemoryVFS
+// - http://localhost:8000/demo/sqlite-wasm-demo.html?config=SqliteWasmMemoryToWorkerVFS&reset
+
 // Copyright 2024 Roy T. Hashimoto. All Rights Reserved.
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
-import { initMemoryVfs } from '../src/examples/SqliteWasmMemoryVFS.js';
-import { registerVfs } from '../src/examples/SqliteWasmMemoryToWorkerVFS.js';
 import { StatementCache } from './statement-cache.js';
 
 // This is the path to the Monaco editor distribution. For development
@@ -37,21 +39,21 @@ const searchParams = new URLSearchParams(location.search);
     vfsModule: null
   },
   {
-    name: 'MemoryVFS',
-    vfsModule: '../src/examples/MemoryVFS.js',
+    name: 'SqliteWasmMemoryVFS',
+    vfsModule: '../src/examples/SqliteWasmMemoryVFS.js',
   },
   {
-    name: 'SMPAWOPFSVFS',
-    vfsModule: '../src/examples/SyncMemoryProxyAsyncWorkerVFS.js',
+    name: 'SqliteWasmMemoryToWorkerVFS',
+    vfsModule: '../src/examples/SqliteWasmMemoryToWorkerVFS.js',
     vfsOptions: { 
       encryptionPassword: searchParams.get('password') || 'abcd123',
+      syncLatencyMsec: 25,
       worker: () => {
         return new Worker(new URL('../src/examples/EncryptedOPFSWorker.js', import.meta.url), { type: 'module' });
       }
     }
   },
 ].map(config => [config.name, config]));
-
 
 const log = console.log;
 const error = console.error;
@@ -80,45 +82,25 @@ async function initSQLite() {
       printErr: error,
     });
 
-    // const memoryVfs = initMemoryVfs(sqlite3);
-    // db = new sqlite3.oo1.DB({
-    //   filename: dbName,
-    //   vfs: memoryVfs.name
-    // });
-
-    const worker = new Worker(new URL('../src/examples/EncryptedOPFSWorker.js', import.meta.url), { type: 'module' });
-
-    // const vfsName = 'memory-worker';
-    // vfsInstance = new SqliteWasmMemoryToWorkerVFS(vfsName, sqlite3, {
-    //   dbName,
-    //   encryptionPassword: searchParams.get('password') || 'abcd123',
-    //   worker: worker,
-    //   syncLatencyMsec: 25
-    // });
-    // registerVfs(sqlite3, vfsInstance);
-    // db = new sqlite3.oo1.DB({
-    //   filename: dbName,
-    //   vfs: vfsName
-    // });
-
-    const vfsName = 'memory-worker';
-    const vfsController = registerVfs(sqlite3, {
-      name: vfsName,
-      dbName: dbName,
-      worker: worker,
-      syncLatencyMsec: 25,
-      encryptionPassword: searchParams.get('password') || 'abcd123',
-    });
-    await vfsController.isReady();
-
-    db = new sqlite3.oo1.DB({
+    const dbSettings = {
       filename: dbName,
-      vfs: vfsName
-    });
+    };
+    if (config.vfsModule) {
+      // Create the VFS and register it as the default file system
+      const vfsName = config.name;
+      const namespace = await import(config.vfsModule);
+      const vfsOptions = {
+        dbName,
+        ...config.vfsOptions
+      };
+      vfsInstance = namespace.registerVfs(sqlite3, vfsName, vfsOptions);
+      await vfsInstance.isReady();
+      dbSettings.vfs = vfsName;
+    }
+    db = new sqlite3.oo1.DB(dbSettings);
 
     const end = performance.now();
     console.log(`SQLite opened ${dbName} in ${(end - start).toFixed(2)} ms`);
-
 
     db.exec('PRAGMA cache_size=-64000');
     db.exec('PRAGMA journal_mode=MEMORY');

@@ -11,15 +11,15 @@
  * Register this VFS with sqlite-wasm
  * 
  * @param {Object} sqlite3 - The sqlite3 object from sqlite-wasm
+ * @param {string} vfsName - The name this VFS will be registered under
  * @param {Object} options - Configuration options
- * @param {string} [options.name='memory-worker'] - The name for the VFS
  * @param {string} [options.dbName='db.sqlite'] - The name of the database file
  * @param {Worker|null} [options.worker=null] - Worker for persistence, or null for memory-only
  * @param {number} [options.syncLatencyMsec=25] - How often to sync to the worker (ms)
  * @param {string} [options.encryptionPassword] - Optional encryption password
  * @returns {Object} The VFS controller
  */
-export function registerVfs(sqlite3, options = {}) {
+export function registerVfs(sqlite3, vfsName, options = {}) {
   if (!sqlite3 || !sqlite3.capi || !sqlite3.wasm) {
     throw new Error("sqlite3 argument is required and must have capi and wasm properties.");
   }
@@ -28,9 +28,8 @@ export function registerVfs(sqlite3, options = {}) {
   const wasm = sqlite3.wasm;
   
   // Extract options
-  const vfsName = options.name || 'memory-worker';
   const dbName = options.dbName || 'db.sqlite';
-  const worker = options.worker || null;
+  const worker = (options.worker instanceof Function) ? options.worker() : options.worker;
   const syncLatencyMsec = options.syncLatencyMsec || 25;
   const encryptionPassword = options.encryptionPassword;
   

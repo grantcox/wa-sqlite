@@ -9,14 +9,16 @@
  * Creates and registers a memory-based VFS for sqlite-wasm
  * 
  * @param {Object} sqlite3 - The sqlite3 module from sqlite-wasm
- * @param {string} [vfsName='memory'] - Optional name for the VFS (defaults to 'memory')
+ * @param {string} vfsName - The name this VFS will be registered under
+ * @param {Object} options - Configuration options
+ * @param {string} [options.name='memory'] - Name for the VFS
  * @returns {Object} VFS controller with utility methods
  */
-export function createMemoryVfs(sqlite3, vfsName = 'memory') {
+export function registerVfs(sqlite3, vfsName, options = {}) {
   if (!sqlite3 || !sqlite3.capi || !sqlite3.wasm) {
     throw new Error("sqlite3 argument is required and must have capi and wasm properties.");
   }
-  
+
   const capi = sqlite3.capi;
   const wasm = sqlite3.wasm;
   
@@ -60,7 +62,7 @@ export function createMemoryVfs(sqlite3, vfsName = 'memory') {
     },
     
     xRead: function(pFile, pDest, nBytes, offset64) {
-      console.log('SqliteWasmMemoryVFS.xRead called with', {pFile, pDest, nBytes, offset64});
+      // console.log('SqliteWasmMemoryVFS.xRead called with', {pFile, pDest, nBytes, offset64});
       const f = openFiles[pFile];
       if (!f) return capi.SQLITE_IOERR_READ;
       
@@ -91,7 +93,7 @@ export function createMemoryVfs(sqlite3, vfsName = 'memory') {
     },
     
     xWrite: function(pFile, pSrc, nBytes, offset64) {
-      console.log('SqliteWasmMemoryVFS.xWrite called with', {pFile, pSrc, nBytes, offset64});
+      // console.log('SqliteWasmMemoryVFS.xWrite called with', {pFile, pSrc, nBytes, offset64});
       const f = openFiles[pFile];
       if (!f) return capi.SQLITE_IOERR_WRITE;
       
@@ -206,7 +208,7 @@ export function createMemoryVfs(sqlite3, vfsName = 'memory') {
   // VFS method implementations
   const vfsMethods = {
     xOpen: function(pVfs, zName, pFile, flags, pOutFlags) {
-      console.log('SQLiteWasmMemoryVFS | xOpen called with', {zName});
+      // console.log('SQLiteWasmMemoryVFS | xOpen called with', {zName});
       try {
         // Parse filename from the C string
         let filename = zName ? wasm.cstrToJs(zName) : randomFilename();
@@ -338,6 +340,10 @@ export function createMemoryVfs(sqlite3, vfsName = 'memory') {
     vfs: memoryVfs,
     name: vfsName,
     
+    isReady: function() {
+      return true;
+    },
+
     /**
      * Clears all storage in the memory VFS
      */
@@ -398,17 +404,4 @@ export function createMemoryVfs(sqlite3, vfsName = 'memory') {
       return buffer ? buffer.slice(0) : null; // Return a copy
     }
   };
-}
-
-/**
- * This is a convenience wrapper that initializes and registers the memory VFS.
- * 
- * @param {Object} sqlite3 - The sqlite3 module from sqlite-wasm
- * @param {Object} options - Configuration options
- * @param {string} [options.name='memory'] - Name for the VFS
- * @returns {Object} - The VFS controller
- */
-export function initMemoryVfs(sqlite3, options = {}) {
-  const name = options.name || 'memory';
-  return createMemoryVfs(sqlite3, name);
 }
